@@ -36,6 +36,12 @@ public class ConvexClient {
   /// The upstream Convex subscription will be canceled if whatever is subscribed to returned publisher
   /// stops listening.
   ///
+  /// The returned publisher is backed by a single Convex subscription, which starts right away and
+  /// ends when any subscriber to the publisher cancels. The publisher then finishes, for remaining
+  /// and later subscribers alike, rather than leaving them with a result that no longer updates. To
+  /// share results between several subscribers, use an operator such as `share()`, or call this
+  /// method once per subscriber.
+  ///
   /// - Parameters:
   ///   - name: A value in "module:query_name"  format that will be used when calling the backend
   ///   - args: An optional ``Dictionary`` of arguments to be sent to the backend query function
@@ -46,12 +52,16 @@ public class ConvexClient {
   ) -> AnyPublisher<T, ClientError> {
     // There are two steps to producing the final Publisher in this method.
     // 1. Subscribe to the data from Convex and publish the subscription handle
-    // 2. Feed the subscription handle into the Convex data Publisher so it can cancel the upstream
-    //    subscription when downstream subscribers are done consuming data
+    // 2. Publish the Convex data once subscribed, and cancel the upstream subscription when
+    //    downstream subscribers are done consuming data
 
-    // This Publisher will ultimately publish the data received from Convex.
-    let convexPublisher = PassthroughSubject<T, ClientError>()
+    // This Publisher will ultimately publish the data received from Convex. It keeps the latest value
+    // because the first one can arrive before the flatMap below subscribes.
+    let convexPublisher = CurrentValueSubject<T?, ClientError>(nil)
     let adapter = SubscriptionAdapter<T>(publisher: convexPublisher)
+
+    // Cancels the upstream subscription, even if consumers stop listening before it has started.
+    let handle = SubscriptionHandleBox()
 
     // This Publisher is responsible for initializing the Convex subscription and returning a handle
     // to the upstream (Convex) subscription.
@@ -64,6 +74,7 @@ public class ConvexClient {
             args: args?.mapValues({ v in
               try v?.convexEncode() ?? "null"
             }) ?? [:], subscriber: adapter)
+          handle.set(subscriptionHandle)
           result(.success(subscriptionHandle))
         } catch {
           result(.failure(ClientError.InternalError(msg: error.localizedDescription)))
@@ -71,14 +82,22 @@ public class ConvexClient {
       }
     }
 
-    // The final Publisher takes the handle from the initial Convex subscription and supplies it to
-    // the data publisher so it can cancel the upstream subscription when consumers are no longer
-    // listening for data.
-    return initializationPublisher.flatMap({ subscriptionHandle in
-      convexPublisher.handleEvents(receiveCancel: {
-        subscriptionHandle.cancel()
-      })
+    // The final Publisher publishes the data once the Convex subscription has started, and cancels
+    // the upstream subscription when consumers are no longer listening for data.
+    return initializationPublisher.flatMap({ _ in
+      convexPublisher.compactMap({ $0 })
     })
+    .handleEvents(
+      receiveCompletion: { _ in
+        handle.cancel()
+      },
+      receiveCancel: {
+        handle.cancel()
+        // The Convex subscription is over, so finish rather than leave other subscribers with a
+        // stale value that looks live.
+        convexPublisher.send(completion: .finished)
+      }
+    )
     .eraseToAnyPublisher()
   }
 
@@ -460,8 +479,36 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   private typealias LoginStrategy = (@Sendable @escaping (String?) -> Void) async throws -> T
 }
 
+/// Holds the handle of a Convex subscription, which arrives asynchronously, so it can be canceled
+/// exactly once, whether cancellation is requested before or after it arrives.
+private final class SubscriptionHandleBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var handle: SubscriptionHandle?
+  private var canceled = false
+
+  /// Stores `handle`, canceling it right away if ``cancel()`` was already called.
+  func set(_ handle: SubscriptionHandle) {
+    lock.lock()
+    let cancelNow = canceled
+    self.handle = handle
+    lock.unlock()
+    if cancelNow {
+      handle.cancel()
+    }
+  }
+
+  /// Cancels the handle if it has arrived, or as soon as it does. Later calls do nothing.
+  func cancel() {
+    lock.lock()
+    let handle = canceled ? nil : self.handle
+    canceled = true
+    lock.unlock()
+    handle?.cancel()
+  }
+}
+
 private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
-  typealias Publisher = PassthroughSubject<T, ClientError>
+  typealias Publisher = CurrentValueSubject<T?, ClientError>
 
   let publisher: Publisher
 
@@ -482,7 +529,7 @@ private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
 
   func onUpdate(value: String) {
     do {
-      publisher.send(try JSONDecoder().decode(Publisher.Output.self, from: Data(value.utf8)))
+      publisher.send(try JSONDecoder().decode(T.self, from: Data(value.utf8)))
     } catch {
       publisher.send(
         completion: .failure(ClientError.InternalError(msg: error.localizedDescription)))

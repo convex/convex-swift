@@ -6,6 +6,7 @@
 //
 
 import Combine
+import Foundation
 import ConvexMobile
 import Testing
 
@@ -56,16 +57,16 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     let clientB = ConvexClient(deploymentUrl: deploymentUrl)
 
     let messagesA: AnyPublisher<[Message]?, ClientError> = clientA.subscribe(to: "messages:list")
+    var resultsA = messagesA.replaceError(with: nil).valuesWithTimeout().makeAsyncIterator()
+
+    // Wait for the initial empty list before sending, so the message can't arrive before clientA
+    // is listening.
+    #expect(try await resultsA.next()! == [])
 
     try await clientB.mutation(
       "messages:send", with: ["author": "Client B", "body": "Test 123"])
 
-    var received = 0
-    for await messages in messagesA.replaceError(with: nil).first().values {
-      #expect(messages! == [Message(author: "Client B", body: "Test 123")])
-      received += 1
-    }
-    #expect(received == 1)
+    #expect(try await resultsA.next()! == [Message(author: "Client B", body: "Test 123")])
   }
 
   @Test func send_and_receive_multiple_messages() async throws {
@@ -176,6 +177,25 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     await receiveTask.value
     
     #expect(states == [.connecting, .connected])
+  }
+}
+
+private struct TimedOut: Error {}
+
+extension Publisher {
+  /// Like `values`, but throws ``TimedOut`` if no value arrives within `seconds` of subscribing or
+  /// of the previous value, so a missing value fails the test instead of hanging the suite.
+  fileprivate func valuesWithTimeout(_ seconds: Int = 10)
+    -> AsyncThrowingPublisher<AnyPublisher<Output, Error>>
+  {
+    // `timeout` delivers events on its scheduler, so it must be serial: on a concurrent queue,
+    // the completion `first()` sends right after its value can overtake it.
+    mapError { $0 as Error }
+      .timeout(
+        .seconds(seconds), scheduler: DispatchQueue(label: "valuesWithTimeout"),
+        customError: { TimedOut() })
+      .eraseToAnyPublisher()
+      .values
   }
 }
 

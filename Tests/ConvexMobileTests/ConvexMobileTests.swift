@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 @testable import ConvexMobile
@@ -30,6 +31,24 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertEqual(result!.id, "the_id")
     XCTAssertEqual(result!.val, 42)
     XCTAssertNil(error)
+  }
+
+  func testSubscribeReceivesValueSentBeforeSubscribing() async throws {
+    let expectation = self.expectation(description: "subscribe")
+    var result: Message?
+    let client = ConvexMobile.ConvexClient(ffiClient: FakeMobileConvexClient())
+
+    // The fake sends this query's value before `subscribe` returns, like a cached result.
+    let cancellationHandle = client.subscribe(to: "immediate").sink(
+      receiveCompletion: { _ in },
+      receiveValue: { (value: Message) in
+        result = value
+        expectation.fulfill()
+      })
+
+    await fulfillment(of: [expectation], timeout: 10)
+    cancellationHandle.cancel()
+    XCTAssertEqual(result?.val, 42)
   }
 
   func testSubscribeCanTrimDupeVals() async throws {
@@ -233,6 +252,45 @@ final class ConvexMobileTests: XCTestCase {
 
     XCTAssertEqual(ffiClient.cancellationCount, 1)
     XCTAssertNil(error)
+  }
+
+  func testSubscribeFinishesForLaterSubscribersAfterCancellation() async throws {
+    let received = self.expectation(description: "first subscriber received a value")
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+    let publisher: AnyPublisher<Message, ClientError> = client.subscribe(to: "foo")
+
+    let first = publisher.sink(receiveCompletion: { _ in }, receiveValue: { _ in received.fulfill() })
+    await fulfillment(of: [received], timeout: 10)
+    first.cancel()
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+
+    // The Convex subscription is gone, so a later subscriber must not get its last value.
+    let finished = self.expectation(description: "later subscriber finished")
+    let later = publisher.sink(
+      receiveCompletion: { completion in
+        if case .finished = completion { finished.fulfill() }
+      },
+      receiveValue: { _ in XCTFail("A canceled subscription should not publish values") })
+    await fulfillment(of: [finished], timeout: 10)
+    later.cancel()
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+  }
+
+  func testSubscribeCancellationBeforeSubscriptionStartsCancelsIt() async throws {
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+
+    // The fake takes a while to start this subscription, so this cancels before its handle arrives.
+    client.subscribe(to: "slowStart", yielding: Message.self)
+      .sink(receiveCompletion: { _ in }, receiveValue: { _ in })
+      .cancel()
+
+    let deadline = Date().addingTimeInterval(5)
+    while ffiClient.cancellationCount == 0 && Date() < deadline {
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
   }
 
   func testMutationRoundTrip() async throws {
@@ -621,6 +679,14 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     async throws -> UniFFI.SubscriptionHandle
   {
     subscriptionArgs = args
+    if name == "slowStart" {
+      try await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
+    }
+    if name == "immediate" {
+      subscriber.onUpdate(
+        value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+      return FakeSubscriptionHandle(client: self)
+    }
     let _ = Task {
       try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
       if name == "typeMismatch" {
