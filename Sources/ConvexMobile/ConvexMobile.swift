@@ -21,9 +21,84 @@ public class ConvexClient {
   ///
   /// - Parameters:
   ///   - deploymentUrl: The Convex backend URL to connect to; find it in the [dashboard](https://dashboard.convex.dev) Settings for your project
-  public init(deploymentUrl: String) {
+  ///   - queryCacheDirectory: A directory to keep the latest query results in. Subscriptions in later
+  ///     launches start with the cached results until fresh ones arrive, including while offline. Use
+  ///     ``defaultQueryCacheDirectory(for:)`` unless you need a specific location. Cached results belong
+  ///     to whoever was signed in, so call ``clearQueryCache()`` when the user signs out or another
+  ///     user signs in (``ConvexClientWithAuth`` does this for you). Only query results are cached:
+  ///     files they refer to, such as image URLs from storage, need their own cache to show offline.
+  public init(deploymentUrl: String, queryCacheDirectory: URL? = nil) {
     self.ffiClient = UniFFI.MobileConvexClient(
-      deploymentUrl: deploymentUrl, clientId: "swift-\(convexMobileVersion)", webSocketStateSubscriber: webSocketStateAdapter)
+      deploymentUrl: deploymentUrl, clientId: "swift-\(convexMobileVersion)",
+      webSocketStateSubscriber: webSocketStateAdapter,
+      queryCacheDirectory: queryCacheDirectory?.path)
+  }
+
+  /// Returns a directory for caching query results from `deploymentUrl`, for use with
+  /// ``init(deploymentUrl:queryCacheDirectory:)``.
+  ///
+  /// The directory is `ConvexQueryCache/<deployment>` inside a folder named after the app's bundle
+  /// identifier (or its process name, if it has none) in the user's Application Support directory.
+  /// The bundle identifier keeps apps that share an Application Support directory, such as
+  /// unsandboxed macOS apps, from sharing a cache.
+  ///
+  /// Creates the directory if needed. Each call also excludes it from backups, since its contents
+  /// can be fetched again, and on iOS, iPadOS, tvOS, watchOS and visionOS sets its file protection
+  /// so files in it stay readable while the device is locked after its first unlock, letting apps
+  /// refresh in the background.
+  public static func defaultQueryCacheDirectory(for deploymentUrl: String) throws -> URL {
+    let applicationSupport = try FileManager.default.url(
+      for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+    let directory = defaultQueryCacheDirectory(
+      for: deploymentUrl, in: applicationSupport,
+      appIdentifier: Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName)
+    try prepareQueryCacheDirectory(at: directory)
+    return directory
+  }
+
+  /// The path of ``defaultQueryCacheDirectory(for:)`` within `applicationSupport`, without creating
+  /// it.
+  static func defaultQueryCacheDirectory(
+    for deploymentUrl: String, in applicationSupport: URL, appIdentifier: String
+  ) -> URL {
+    func pathComponent(_ name: String, allowing allowed: CharacterSet) -> String {
+      name.unicodeScalars.map { allowed.contains($0) ? String($0) : "_" }.joined()
+    }
+    let app = pathComponent(
+      appIdentifier, allowing: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-.")))
+    let deployment = pathComponent(deploymentUrl, allowing: .alphanumerics)
+    return applicationSupport
+      .appendingPathComponent(app, isDirectory: true)
+      .appendingPathComponent("ConvexQueryCache", isDirectory: true)
+      .appendingPathComponent(deployment, isDirectory: true)
+  }
+
+  /// Creates `directory` if needed, then excludes it from backups and sets its file protection.
+  /// Both are applied to an existing directory too, such as one created by an earlier version.
+  static func prepareQueryCacheDirectory(at directory: URL) throws {
+    var attributes: [FileAttributeKey: Any] = [:]
+    #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+      attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
+    #endif
+    try FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true, attributes: attributes)
+    // `createDirectory` doesn't change the attributes of a directory that already exists.
+    if !attributes.isEmpty {
+      try FileManager.default.setAttributes(attributes, ofItemAtPath: directory.path)
+    }
+    var resourceValues = URLResourceValues()
+    resourceValues.isExcludedFromBackup = true
+    var directory = directory
+    try directory.setResourceValues(resourceValues)
+  }
+
+  /// Deletes cached query results, from memory and from the
+  /// ``init(deploymentUrl:queryCacheDirectory:)`` directory. Results already delivered to subscribers are
+  /// unaffected.
+  ///
+  /// Does nothing if the client was created without a query cache.
+  public func clearQueryCache() async throws {
+    try await ffiClient.clearQueryCache()
   }
 
   init(ffiClient: UniFFI.MobileConvexClientProtocol) {
@@ -56,7 +131,7 @@ public class ConvexClient {
     //    downstream subscribers are done consuming data
 
     // This Publisher will ultimately publish the data received from Convex. It keeps the latest value
-    // because the first one can arrive before the flatMap below subscribes.
+    // because the first one, such as a cached result, can arrive before the flatMap below subscribes.
     let convexPublisher = CurrentValueSubject<T?, ClientError>(nil)
     let adapter = SubscriptionAdapter<T>(publisher: convexPublisher)
 
@@ -250,7 +325,8 @@ public protocol AuthProvider<T> {
   ///
   /// - Parameter onIdToken: A callback to invoke with a fresh JWT ID token. The auth provider should store
   ///   this callback and invoke it whenever a new token is available (e.g., on token refresh).
-  ///   Call with `nil` if the session becomes invalid (e.g., token refresh fails).
+  ///   Call with `nil` if the session becomes invalid (e.g., token refresh fails); this logs out the
+  ///   client and clears cached query results.
   func login(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> T
 
   /// Trigger a logout flow, which might launch a new UI/screen.
@@ -261,9 +337,17 @@ public protocol AuthProvider<T> {
   /// For OAuth providers, this is a good place to check token validity and perform a refresh if necessary
   /// before returning the auth data as``T``.
   ///
+  /// If the refresh fails because the device is offline, return the stored credentials rather than
+  /// throwing, even if their token has expired. If this throws, ``ConvexClientWithAuth/authState``
+  /// becomes ``AuthState/unauthenticated``, so apps that wait for ``AuthState/authenticated`` before
+  /// subscribing never show cached query results while offline. (Subscriptions still start with cached
+  /// results; only apps that gate on the auth state hide them.) The stale token is never checked
+  /// offline, and ``ConvexClientWithAuth`` calls this again to get a fresh token when it reconnects.
+  ///
   /// - Parameter onIdToken: A callback to invoke with a fresh JWT ID token. The auth provider should store
   ///   this callback and invoke it whenever a new token is available (e.g., on token refresh).
-  ///   Call with `nil` if the session becomes invalid (e.g., token refresh fails).
+  ///   Call with `nil` if the session becomes invalid (e.g., token refresh fails); this logs out the
+  ///   client and clears cached query results.
   func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void)
     async throws -> T
 
@@ -360,10 +444,21 @@ private final class AuthSession<T>: @unchecked Sendable {
 
   /// Makes `bridge` the active auth provider and publishes ``AuthState/authenticated(_:)`` with
   /// `authData` once the Rust client has it.
+  ///
+  /// If `isNewSession` and another session is installed, which happens when a user switches accounts
+  /// without logging out, cached query results are cleared before ``AuthState/authenticated(_:)`` is
+  /// published, so the previous user's results aren't shown or kept for the new user. This happens
+  /// in the same queued operation, so a later login or token push can't run in between.
   func install(
-    _ bridge: AuthTokenProviderBridge, authData: T, on ffiClient: MobileConvexClientProtocol
+    _ bridge: AuthTokenProviderBridge, authData: T, isNewSession: Bool,
+    on ffiClient: MobileConvexClientProtocol
   ) async throws {
-    try await perform { [authPublisher] _ in
+    try await perform { [authPublisher] current in
+      // Cleared before the new session is installed, so the previous user's results aren't shown
+      // to it and the new session's results aren't deleted.
+      if isNewSession && current != nil {
+        await Self.clearQueryCache(on: ffiClient)
+      }
       try await ffiClient.setAuthCallback(provider: bridge)
       authPublisher.send(.authenticated(authData))
       return bridge
@@ -381,24 +476,43 @@ private final class AuthSession<T>: @unchecked Sendable {
   }
 
   /// Queues a token pushed by the ``AuthProvider`` and returns without waiting for it to be applied.
+  ///
+  /// A `nil` token means the session is no longer valid: the Rust client is logged out and cached
+  /// query results are cleared, so they aren't shown to whoever signs in next.
   func pushToken(_ token: String?, on ffiClient: MobileConvexClientProtocol) {
     operations.yield { [authPublisher] current in
-      do {
-        if let token {
-          guard let current else { return nil }
-          await current.updateToken(token)
-          try await ffiClient.setAuthCallback(provider: current)
-          return current
-        } else {
+      guard let token else {
+        var next = current
+        do {
           try await ffiClient.setAuthCallback(provider: nil)
-          authPublisher.send(.unauthenticated)
-          return nil
+          next = nil
+        } catch {
+          dump(error)
         }
+        // Like `logout()`, clear even if logging out the Rust client failed.
+        await Self.clearQueryCache(on: ffiClient)
+        authPublisher.send(.unauthenticated)
+        return next
+      }
+      do {
+        guard let current else { return nil }
+        await current.updateToken(token)
+        try await ffiClient.setAuthCallback(provider: current)
+        return current
       } catch {
         dump(error)
         authPublisher.send(.unauthenticated)
         return current
       }
+    }
+  }
+
+  /// Clears cached query results, logging rather than throwing errors so auth changes still apply.
+  private static func clearQueryCache(on ffiClient: MobileConvexClientProtocol) async {
+    do {
+      try await ffiClient.clearQueryCache()
+    } catch {
+      dump(error)
     }
   }
 
@@ -441,10 +555,19 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   /// - Parameters:
   ///   - deploymentUrl: The Convex backend URL to connect to; find it in the [dashboard](https://dashboard.convex.dev) Settings for your project
   ///   - authProvider: An instance that will handle the actual authentication duties.
-  public init(deploymentUrl: String, authProvider: any AuthProvider<T>) {
+  ///   - queryCacheDirectory: A directory to keep the latest query results in; see
+  ///     ``ConvexClient/init(deploymentUrl:queryCacheDirectory:)``. It's cleared by ``logout()``, when
+  ///     `authProvider` reports that the session is invalid by passing `nil` to `onIdToken`, and when
+  ///     ``login()`` replaces a signed-in user's session, so one user's results aren't shown to the
+  ///     next. If your app waits for ``AuthState/authenticated`` before subscribing, `authProvider`
+  ///     must let ``loginFromCache()`` succeed offline with stored credentials, or cached results
+  ///     won't show; see ``AuthProvider/loginFromCache(onIdToken:)``.
+  public init(
+    deploymentUrl: String, authProvider: any AuthProvider<T>, queryCacheDirectory: URL? = nil
+  ) {
     self.authProvider = authProvider
     self.authState = authSession.authState
-    super.init(deploymentUrl: deploymentUrl)
+    super.init(deploymentUrl: deploymentUrl, queryCacheDirectory: queryCacheDirectory)
   }
 
   init(ffiClient: MobileConvexClientProtocol, authProvider: any AuthProvider<T>) {
@@ -458,8 +581,11 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   /// The ``authState`` is set to ``AuthState.loading`` once any pending auth changes have been applied
   /// and will change to either ``AuthState.authenticated`` or ``AuthState.unauthenticated``
   /// depending on the result.
+  ///
+  /// If a user is already signed in, cached query results are cleared once the new login succeeds,
+  /// since it may be a different user. Call ``logout()`` first to clear them right away.
   public func login() async -> Result<T, Error> {
-    await login(strategy: authProvider.login)
+    await login(strategy: authProvider.login, isNewSession: true)
   }
 
   /// Triggers a cached, UI-less re-authentication flow using previously stored credentials and updates the
@@ -473,12 +599,13 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   /// and will change to either ``AuthState.authenticated`` or ``AuthState.unauthenticated``
   /// depending on the result.
   public func loginFromCache() async -> Result<T, Error> {
-    await login(strategy: authProvider.loginFromCache)
+    await login(strategy: authProvider.loginFromCache, isNewSession: false)
   }
 
   /// Triggers a logout flow and updates the ``authState``.
   ///
-  /// The ``authState`` will change to ``AuthState.unauthenticated`` if logout is successful.
+  /// The ``authState`` will change to ``AuthState.unauthenticated`` if logout is successful. Cached query
+  /// results are deleted even if logout fails, so they're never shown to the next user.
   public func logout() async {
     do {
       try await authProvider.logout()
@@ -486,9 +613,16 @@ public class ConvexClientWithAuth<T>: ConvexClient {
     } catch {
       dump(error)
     }
+    do {
+      try await clearQueryCache()
+    } catch {
+      dump(error)
+    }
   }
 
-  private func login(strategy: LoginStrategy) async -> Result<T, Error> {
+  /// - Parameter isNewSession: Whether the login may be for a different user than the current
+  ///   session's, which clears cached query results; see ``AuthSession/install(_:authData:isNewSession:on:)``.
+  private func login(strategy: LoginStrategy, isNewSession: Bool) async -> Result<T, Error> {
     authSession.beginLogin()
     do {
       let idTokenHandler = onIdTokenHandler()
@@ -504,7 +638,8 @@ public class ConvexClientWithAuth<T>: ConvexClient {
           return authProvider.extractIdToken(from: refreshData)
         }
       )
-      try await authSession.install(bridge, authData: authData, on: ffiClient)
+      try await authSession.install(
+        bridge, authData: authData, isNewSession: isNewSession, on: ffiClient)
       return Result.success(authData)
     } catch {
       dump(error)
@@ -578,6 +713,9 @@ private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
   }
 
   func onUpdate(value: String) {
+    // Values from the server and values set by optimistic updates arrive the same way, so a value
+    // that can't be decoded ends the subscription either way. `OptimisticLocalStore.setQuery`
+    // encodes values the way they're decoded here, so values derived from server results decode.
     do {
       publisher.send(try JSONDecoder().decode(T.self, from: Data(value.utf8)))
     } catch {

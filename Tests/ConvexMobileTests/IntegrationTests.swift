@@ -147,6 +147,96 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     #expect(try await results.next()! == fromServer)
   }
 
+  @Test func cached_results_are_shown_offline_after_restart() async throws {
+    let cacheDirectory = temporaryCacheDirectory()
+    defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+    let expected = [Message(author: "Cache", body: "Test 123")]
+    try await cacheMessages(expected, in: cacheDirectory)
+    try moveCachedResults(in: cacheDirectory, to: offlineDeploymentUrl)
+
+    // A new client that can't reach its deployment still starts with the cached result.
+    let offline = ConvexClient(
+      deploymentUrl: offlineDeploymentUrl, queryCacheDirectory: cacheDirectory)
+    let offlineMessages: AnyPublisher<[Message], ClientError> = offline.subscribe(
+      to: "messages:list")
+    var offlineResults = offlineMessages.valuesWithTimeout().makeAsyncIterator()
+    #expect(try await offlineResults.next() == expected)
+
+    try await offline.clearQueryCache()
+    #expect(cachedFiles(in: cacheDirectory).isEmpty)
+  }
+
+  @Test func cached_results_are_shown_offline_when_signed_in_with_an_expired_token() async throws {
+    let cacheDirectory = temporaryCacheDirectory()
+    defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+    let expected = [Message(author: "Cache", body: "Signed in")]
+    try await cacheMessages(expected, in: cacheDirectory)
+    try moveCachedResults(in: cacheDirectory, to: offlineDeploymentUrl)
+
+    // Apps commonly wait until they're signed in to subscribe, so signing in offline must succeed
+    // for cached results to show.
+    let offline = ConvexClientWithAuth(
+      deploymentUrl: offlineDeploymentUrl, authProvider: OfflineAuthProvider(),
+      queryCacheDirectory: cacheDirectory)
+    let login = await offline.loginFromCache()
+    #expect(try login.get() == OfflineAuthProvider.expiredToken)
+    for try await state in offline.authState.valuesWithTimeout() {
+      if case .authenticated = state { break }
+    }
+
+    let offlineMessages: AnyPublisher<[Message], ClientError> = offline.subscribe(
+      to: "messages:list")
+    var offlineResults = offlineMessages.valuesWithTimeout().makeAsyncIterator()
+    #expect(try await offlineResults.next() == expected)
+  }
+
+  /// A deployment URL that can't be reached, standing in for this test's deployment while offline.
+  private let offlineDeploymentUrl = "https://offline.invalid/"
+
+  /// Cached results are only restored for the deployment they came from, so make the results in
+  /// `directory` look like they came from `deploymentUrl`.
+  private func moveCachedResults(in directory: URL, to deploymentUrl: String) throws {
+    for file in cachedFiles(in: directory) {
+      let url = directory.appendingPathComponent(file)
+      var file = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+      var query = file["query"] as! [String: Any]
+      query["deploymentUrl"] = deploymentUrl
+      file["query"] = query
+      try JSONSerialization.data(withJSONObject: file).write(to: url)
+    }
+  }
+
+  private func temporaryCacheDirectory() -> URL {
+    FileManager.default.temporaryDirectory
+      .appendingPathComponent("convex-query-cache-\(UUID().uuidString)", isDirectory: true)
+  }
+
+  /// Cache files in `directory`. Saves write a temporary file first, so only finished files count.
+  private func cachedFiles(in directory: URL) -> [String] {
+    ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+      .filter { $0.hasSuffix(".convexquery") }
+  }
+
+  /// Sends `messages` and waits until a client with a cache in `directory` has saved them as the
+  /// result of `messages:list`.
+  private func cacheMessages(_ messages: [Message], in directory: URL) async throws {
+    let online = ConvexClient(deploymentUrl: deploymentUrl, queryCacheDirectory: directory)
+    for message in messages {
+      try await online.mutation(
+        "messages:send", with: ["author": message.author, "body": message.body])
+    }
+    let onlineMessages: AnyPublisher<[Message], ClientError> = online.subscribe(to: "messages:list")
+    var onlineResults = onlineMessages.valuesWithTimeout().makeAsyncIterator()
+    #expect(try await onlineResults.next() == messages)
+
+    // Saves happen in the background at most every 500ms.
+    let deadline = Date().addingTimeInterval(5)
+    while cachedFiles(in: directory).isEmpty && Date() < deadline {
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    #expect(!cachedFiles(in: directory).isEmpty)
+  }
+
   @Test func send_and_receive_multiple_messages() async throws {
     let clientA = ConvexClient(deploymentUrl: deploymentUrl)
     let clientB = ConvexClient(deploymentUrl: deploymentUrl)
@@ -333,4 +423,30 @@ private struct NullableFloats: Decodable, Equatable {
   var aNullableDouble: Double?
   @OptionalConvexFloat
   var aMissingDouble: Double?
+}
+
+/// An ``AuthProvider`` whose stored token has expired and can't be refreshed because the device is
+/// offline. It returns the stored credentials anyway, as providers should for cached results to show.
+private final class OfflineAuthProvider: AuthProvider {
+  static let expiredToken = "expired-token"
+
+  func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
+    do {
+      return try await refreshedToken()
+    } catch is URLError {
+      return Self.expiredToken
+    }
+  }
+
+  func login(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
+    throw URLError(.notConnectedToInternet)
+  }
+
+  func logout() async throws {}
+
+  func extractIdToken(from authResult: String) -> String { authResult }
+
+  private func refreshedToken() async throws -> String {
+    throw URLError(.notConnectedToInternet)
+  }
 }

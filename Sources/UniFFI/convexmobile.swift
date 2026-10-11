@@ -633,6 +633,8 @@ public protocol MobileConvexClientProtocol : AnyObject {
     
     func action(name: String, args: [String: String]) async throws  -> String
     
+    func clearQueryCache() async throws 
+    
     func mutation(name: String, args: [String: String]) async throws  -> String
     
     func mutationWithOptimisticUpdate(name: String, args: [String: String], optimisticUpdate: MobileOptimisticUpdate) async throws  -> String
@@ -675,13 +677,14 @@ open class MobileConvexClient:
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
         return try! rustCall { uniffi_convexmobile_fn_clone_mobileconvexclient(self.pointer, $0) }
     }
-public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?) {
+public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?, queryCacheDirectory: String?) {
     let pointer =
         try! rustCall() {
     uniffi_convexmobile_fn_constructor_mobileconvexclient_new(
         FfiConverterString.lower(deploymentUrl),
         FfiConverterString.lower(clientId),
-        FfiConverterOptionTypeWebSocketStateSubscriber.lower(webSocketStateSubscriber),$0
+        FfiConverterOptionTypeWebSocketStateSubscriber.lower(webSocketStateSubscriber),
+        FfiConverterOptionString.lower(queryCacheDirectory),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -711,6 +714,23 @@ open func action(name: String, args: [String: String])async throws  -> String {
             completeFunc: ffi_convexmobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_convexmobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeClientError.lift
+        )
+}
+    
+open func clearQueryCache()async throws  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_convexmobile_fn_method_mobileconvexclient_clear_query_cache(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_convexmobile_rust_future_poll_void,
+            completeFunc: ffi_convexmobile_rust_future_complete_void,
+            freeFunc: ffi_convexmobile_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeClientError.lift
         )
 }
@@ -2008,6 +2028,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_action() != 2118) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_convexmobile_checksum_method_mobileconvexclient_clear_query_cache() != 688) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_mutation() != 29570) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2050,7 +2073,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_websocketstatesubscriber_on_state_change() != 60594) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 43734) {
+    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 48332) {
         return InitializationResult.apiChecksumMismatch
     }
 

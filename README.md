@@ -50,6 +50,41 @@ for await latestValue in yourData {
 
 try await client.mutation("your:mutation", with: ["anotherArg": "anotherVal", "anInt": 42])
 ```
+
+## Caching query results across launches
+
+Pass a `queryCacheDirectory` to keep the latest result of each query on disk. In later launches,
+subscriptions start with the cached result until a fresh one arrives from the server, so your app can
+show data right away and while offline.
+
+```swift
+let deploymentUrl = "your convex deployment URL"
+let client = ConvexClient(
+  deploymentUrl: deploymentUrl,
+  queryCacheDirectory: try ConvexClient.defaultQueryCacheDirectory(for: deploymentUrl))
+```
+
+`defaultQueryCacheDirectory(for:)` returns a directory for the deployment inside a folder named after
+your app's bundle identifier in Application Support. It's excluded from backups, and on iOS, tvOS,
+watchOS and visionOS its files stay readable while the device is locked after its first unlock, so
+your app can refresh in the background.
+
+Keep in mind:
+
+- **Cached results belong to whoever was signed in.** Call `clearQueryCache()` when the user signs out
+  or another user signs in. `ConvexClientWithAuth` does this for you when you call `logout()`, when
+  your `AuthProvider` passes `nil` to `onIdToken` because the session is no longer valid, and when
+  `login()` succeeds while a user is already signed in, since it may be a different user.
+- **Signing in offline must succeed.** If your app waits for `AuthState.authenticated` before
+  subscribing, your `AuthProvider`'s `loginFromCache` has to return the stored credentials when it
+  can't refresh them because the device is offline, even if their token has expired. If it throws,
+  `authState` becomes `.unauthenticated`, so an app that waits for `.authenticated` never subscribes
+  and never shows cached results. (Subscriptions start with cached results regardless of the auth
+  state; only apps that gate on it hide them.) The client fetches a fresh token through
+  `loginFromCache` once it reconnects.
+- **Only query results are cached.** Files they refer to, such as image URLs from
+  `ctx.storage.getUrl`, aren't downloaded. To show them offline, cache their contents yourself, for
+  example on disk keyed by URL.
  
 ## Building
 

@@ -44,6 +44,11 @@ public final class OptimisticLocalStore {
 
   /// Retrieves the result of a query from the client.
   ///
+  /// A query whose result is Convex `null` can only be decoded when `T` is an `Optional`, and then
+  /// returns `.some(nil)`. Once flattened, for example with `?? nil`, that's indistinguishable from
+  /// the `nil` returned for a query that's loading, so check the outer optional first if the
+  /// difference matters. With a non-`Optional` `T`, a `null` result throws a `DecodingError`.
+  ///
   /// - Parameters:
   ///   - name: A value in "module:query_name" format
   ///   - args: An optional ``Dictionary`` of arguments to the query
@@ -135,10 +140,17 @@ public struct OptimisticQuery<T> {
   /// The query's arguments, which can be passed back to
   /// ``OptimisticLocalStore/setQuery(_:with:to:)``.
   public let args: [String: ConvexEncodable?]
-  /// The query result, or `nil` if the query is loading or is in an error state.
+  /// The query result, or `nil` if the query is loading or is in an error state. As with
+  /// ``OptimisticLocalStore/getQuery(_:with:yielding:)``, a Convex `null` result is `.some(nil)` when
+  /// `T` is an `Optional`.
   public let value: T?
 
   /// Decodes the query's arguments into `type`.
+  ///
+  /// The arguments are in their Convex encoding, as sent to the server, so `type` must decode them
+  /// as it would a query result: arguments passed as `Int`, `Int32` or `Int64` are Convex `Int64`s
+  /// and need ``ConvexInt`` (or ``OptionalConvexInt``), while `Double` and `Float` arguments are
+  /// plain numbers.
   public func decodeArgs<A: Decodable>(as type: A.Type) throws -> A {
     let json = try args.convexEncode()
     return try JSONDecoder().decode(A.self, from: Data(json.utf8))
