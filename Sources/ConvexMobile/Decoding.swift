@@ -20,7 +20,7 @@ public struct ConvexInt<IntegerType: FixedWidthInteger>: Decodable, Equatable {
     let b64int = try container.decode(String.self, forKey: .integer)
     self.wrappedValue = Data(base64Encoded: b64int)!.withUnsafeBytes({
       (rawPtr: UnsafeRawBufferPointer) in
-      return rawPtr.load(as: IntegerType.self)
+      return rawPtr.loadUnaligned(as: IntegerType.self)
     })
   }
 
@@ -42,7 +42,7 @@ public struct OptionalConvexInt<IntegerType: FixedWidthInteger>: Decodable, Equa
       let b64int = try container.decode(String.self, forKey: .integer)
       self.wrappedValue = Data(base64Encoded: b64int)!.withUnsafeBytes({
         (rawPtr: UnsafeRawBufferPointer) in
-        return rawPtr.load(as: IntegerType.self)
+        return rawPtr.loadUnaligned(as: IntegerType.self)
       })
     }
   }
@@ -66,7 +66,7 @@ public struct ConvexFloat<FloatingPointType: BinaryFloatingPoint & Decodable>: D
       let b64float = try container.decode(String.self, forKey: .float)
       self.wrappedValue = Data(base64Encoded: b64float)!.withUnsafeBytes({
         (rawPtr: UnsafeRawBufferPointer) in
-        let decoded = rawPtr.load(as: Double.self)
+        let decoded = rawPtr.loadUnaligned(as: Double.self)
         return FloatingPointType.self(decoded)
       })
     } else {
@@ -94,7 +94,7 @@ public struct OptionalConvexFloat<FloatingPointType: BinaryFloatingPoint & Decod
       let b64float = try container.decode(String.self, forKey: .float)
       self.wrappedValue = Data(base64Encoded: b64float)!.withUnsafeBytes({
         (rawPtr: UnsafeRawBufferPointer) in
-        let decoded = rawPtr.load(as: Double.self)
+        let decoded = rawPtr.loadUnaligned(as: Double.self)
         return FloatingPointType.self(decoded)
       })
     } else {
