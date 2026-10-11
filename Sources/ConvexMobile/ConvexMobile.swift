@@ -127,6 +127,56 @@ public class ConvexClient {
     let _: String? = try await mutation(name, with: args)
   }
 
+  /// Executes the mutation with the given `name` and `args`, applying `optimisticUpdate` to local query
+  /// results while the mutation is in flight, and returns the result.
+  ///
+  /// Subscribers see the optimistically updated results right away. The update is rolled back once the
+  /// mutation's result is reflected in query results from the server, or when the mutation fails.
+  ///
+  /// ```swift
+  /// try await client.mutation("messages:send", with: ["body": body], optimisticUpdate: { store in
+  ///   let messages: [Message] = try store.getQuery("messages:list") ?? []
+  ///   try store.setQuery("messages:list", to: messages + [Message(body: body)])
+  /// })
+  /// ```
+  ///
+  /// For mutations that don't return a value, prefer calling the version of this method that doesn't return a value.
+  ///
+  /// - Parameters:
+  ///   - name: A value in "module:mutation_name"  format that will be used when calling the backend
+  ///   - args: An optional ``Dictionary`` of arguments to be sent to the backend mutation function
+  ///   - optimisticUpdate: An ``OptimisticUpdate`` to apply to local query results
+  public func mutation<T: Decodable>(
+    _ name: String, with args: [String: ConvexEncodable?]? = nil,
+    optimisticUpdate: @escaping OptimisticUpdate
+  ) async throws -> T {
+    let adapter = OptimisticUpdateAdapter(update: optimisticUpdate)
+    return try await callForResult(name: name, args: args) { [ffiClient] name, args in
+      do {
+        return try await ffiClient.mutationWithOptimisticUpdate(
+          name: name, args: args, optimisticUpdate: adapter)
+      } catch {
+        throw adapter.firstRunError ?? error
+      }
+    }
+  }
+
+  /// Executes the mutation with the given `name` and `args`, applying `optimisticUpdate` to local query
+  /// results while the mutation is in flight, without returning a result.
+  ///
+  /// For mutations that return a value, prefer calling the version of this method that returns a ``Decodable`` value.
+  ///
+  /// - Parameters:
+  ///   - name: A value in "module:mutation_name"  format that will be used when calling the backend
+  ///   - args: An optional ``Dictionary`` of arguments to be sent to the backend mutation function
+  ///   - optimisticUpdate: An ``OptimisticUpdate`` to apply to local query results
+  public func mutation(
+    _ name: String, with args: [String: ConvexEncodable?]? = nil,
+    optimisticUpdate: @escaping OptimisticUpdate
+  ) async throws {
+    let _: String? = try await mutation(name, with: args, optimisticUpdate: optimisticUpdate)
+  }
+
   /// Executes the action with the given `name` and `args` and returns the result.
   ///
   /// For actions that don't return a value, prefer calling the version of this method that doesn't return a value.

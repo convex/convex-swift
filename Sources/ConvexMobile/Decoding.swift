@@ -123,3 +123,88 @@ extension KeyedDecodingContainer {
     return try decodeIfPresent(type, forKey: key) ?? OptionalConvexFloat(wrappedValue: nil)
   }
 }
+
+// Encoding the wrappers lets types that use them be written to the client with
+// `OptimisticLocalStore.setQuery`, round tripping through the same Convex encoding used for decoding.
+
+private func encodeConvexInt<IntegerType: FixedWidthInteger>(
+  _ value: IntegerType, to encoder: Encoder
+) throws {
+  var container = encoder.container(keyedBy: ConvexIntCodingKey.self)
+  // Reinterpret the bits, like decoding does, rather than trapping for unsigned values above
+  // `Int64.max`.
+  let data = withUnsafeBytes(of: Int64(truncatingIfNeeded: value)) { Data($0) }
+  try container.encode(data.base64EncodedString(), forKey: .integer)
+}
+
+private func encodeConvexFloat<FloatingPointType: BinaryFloatingPoint & Encodable>(
+  _ value: FloatingPointType, to encoder: Encoder
+) throws {
+  let asDouble = Double(value)
+  if asDouble.isNaN || asDouble.isInfinite {
+    var container = encoder.container(keyedBy: ConvexFloatCodingKey.self)
+    let data = withUnsafeBytes(of: asDouble) { Data($0) }
+    try container.encode(data.base64EncodedString(), forKey: .float)
+  } else {
+    var container = encoder.singleValueContainer()
+    try container.encode(value)
+  }
+}
+
+private enum ConvexIntCodingKey: String, CodingKey {
+  case integer = "$integer"
+}
+
+private enum ConvexFloatCodingKey: String, CodingKey {
+  case float = "$float"
+}
+
+extension ConvexInt: Encodable {
+  public func encode(to encoder: Encoder) throws {
+    try encodeConvexInt(wrappedValue, to: encoder)
+  }
+}
+
+extension OptionalConvexInt: Encodable {
+  public func encode(to encoder: Encoder) throws {
+    if let wrappedValue {
+      try encodeConvexInt(wrappedValue, to: encoder)
+    } else {
+      var container = encoder.singleValueContainer()
+      try container.encodeNil()
+    }
+  }
+}
+
+extension ConvexFloat: Encodable where FloatingPointType: Encodable {
+  public func encode(to encoder: Encoder) throws {
+    try encodeConvexFloat(wrappedValue, to: encoder)
+  }
+}
+
+extension OptionalConvexFloat: Encodable where FloatingPointType: Encodable {
+  public func encode(to encoder: Encoder) throws {
+    if let wrappedValue {
+      try encodeConvexFloat(wrappedValue, to: encoder)
+    } else {
+      var container = encoder.singleValueContainer()
+      try container.encodeNil()
+    }
+  }
+}
+
+// This omits OptionalConvex[Int|Float] keys when the value is nil, mirroring decoding.
+extension KeyedEncodingContainer {
+  public mutating func encode<T>(_ value: OptionalConvexInt<T>, forKey key: Self.Key) throws {
+    if value.wrappedValue != nil {
+      try encodeIfPresent(value, forKey: key)
+    }
+  }
+
+  public mutating func encode<T>(_ value: OptionalConvexFloat<T>, forKey key: Self.Key) throws
+  where T: Encodable {
+    if value.wrappedValue != nil {
+      try encodeIfPresent(value, forKey: key)
+    }
+  }
+}

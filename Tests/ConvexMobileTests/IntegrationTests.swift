@@ -22,7 +22,7 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     let client = ConvexClient(deploymentUrl: deploymentUrl)
     let s = client.subscribe(to: "messages:list", yielding: [Message]?.self)
     var received = 0
-    for await messages in s.replaceError(with: nil).first().values {
+    for try await messages in s.replaceError(with: nil).first().valuesWithTimeout() {
       #expect(messages! == [])
       received += 1
     }
@@ -34,7 +34,7 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     let s: AnyPublisher<[Message]?, ClientError> = client.subscribe(
       to: "messages:list", with: ["forceError": true])
     await #expect(throws: ClientError.ConvexError(data: "\"forced error data\"")) {
-      for try await _ in s.first().values {}
+      for try await _ in s.first().valuesWithTimeout() {}
     }
   }
 
@@ -69,52 +69,105 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     #expect(try await resultsA.next()! == [Message(author: "Client B", body: "Test 123")])
   }
 
+  @Test func optimistic_update_is_visible_until_mutation_is_reflected() async throws {
+    let client = ConvexClient(deploymentUrl: deploymentUrl)
+    let messages: AnyPublisher<[Message]?, ClientError> = client.subscribe(to: "messages:list")
+    var results = messages.replaceError(with: nil).valuesWithTimeout().makeAsyncIterator()
+    #expect(try await results.next()! == [])
+
+    let optimistic = [Message(author: "Optimistic", body: "Test 123")]
+    let fromServer = [Message(author: "Client", body: "Test 123")]
+    let mutation = Task {
+      try await client.mutation(
+        "messages:send", with: ["author": "Client", "body": "Test 123"],
+        optimisticUpdate: { store in
+          let current: [Message] = try store.getQuery("messages:list") ?? []
+          try store.setQuery("messages:list", to: current + optimistic)
+        })
+    }
+
+    // The optimistic value is applied before the mutation is sent, and stays until the mutation's
+    // result is reflected in the query. A subscriber that isn't waiting for a value only gets the
+    // latest one, though, so the optimistic value can be skipped if the server's result arrives
+    // while the test isn't waiting.
+    var latest = try await results.next()!!
+    #expect(latest == optimistic || latest == fromServer)
+    while latest == optimistic {
+      latest = try await results.next()!!
+    }
+    #expect(latest == fromServer)
+    try await mutation.value
+  }
+
+  @Test func optimistic_update_rolls_back_when_mutation_fails() async throws {
+    let client = ConvexClient(deploymentUrl: deploymentUrl)
+    let messages: AnyPublisher<[Message]?, ClientError> = client.subscribe(to: "messages:list")
+    var results = messages.replaceError(with: nil).valuesWithTimeout().makeAsyncIterator()
+    #expect(try await results.next()! == [])
+
+    let mutation = Task {
+      try await client.mutation(
+        "messages:forceMutationError",
+        optimisticUpdate: { store in
+          try store.setQuery("messages:list", to: [Message(author: "Optimistic", body: "Nope")])
+        })
+    }
+
+    // As above, the optimistic value can be skipped if the rollback arrives while the test isn't
+    // waiting.
+    var latest = try await results.next()!!
+    if latest == [Message(author: "Optimistic", body: "Nope")] {
+      latest = try await results.next()!!
+    }
+    #expect(latest == [])
+    await #expect(throws: ClientError.ConvexError(data: "\"forced error data\"")) {
+      try await mutation.value
+    }
+  }
+
+  @Test func throwing_optimistic_update_fails_the_mutation_without_sending_it() async throws {
+    struct BadUpdate: Error {}
+    let client = ConvexClient(deploymentUrl: deploymentUrl)
+    let messages: AnyPublisher<[Message]?, ClientError> = client.subscribe(to: "messages:list")
+    var results = messages.replaceError(with: nil).valuesWithTimeout().makeAsyncIterator()
+    #expect(try await results.next()! == [])
+
+    await #expect(throws: BadUpdate.self) {
+      try await client.mutation(
+        "messages:send", with: ["author": "Client", "body": "Never sent"],
+        optimisticUpdate: { store in
+          try store.setQuery("messages:list", to: [Message(author: "Optimistic", body: "Nope")])
+          throw BadUpdate()
+        })
+    }
+
+    // The client still works, and the message was never sent.
+    let fromServer = [Message(author: "Client", body: "Sent")]
+    try await client.mutation("messages:send", with: ["author": "Client", "body": "Sent"])
+    #expect(try await results.next()! == fromServer)
+  }
+
   @Test func send_and_receive_multiple_messages() async throws {
     let clientA = ConvexClient(deploymentUrl: deploymentUrl)
     let clientB = ConvexClient(deploymentUrl: deploymentUrl)
 
     let messagesA: AnyPublisher<[Message]?, ClientError> = clientA.subscribe(to: "messages:list")
 
-    var receivedMessages: [[Message]] = []
+    var resultsA = messagesA.replaceError(with: nil).valuesWithTimeout().makeAsyncIterator()
+    var latest = try await resultsA.next()!
+    #expect(latest == [])
 
-    let receiveTask = Task {
-      for await messages in messagesA.replaceError(with: nil).output(in: 0...3).values {
-        receivedMessages.append(messages ?? [])
+    // Each send is awaited before the next, so clientA sees each new message in turn. Transitions
+    // that don't change the query can repeat the previous result, so skip repeats.
+    for i in 1...3 {
+      try await clientB.mutation(
+        "messages:send", with: ["author": "Client B", "body": "Message \(i)"])
+      let previous = latest
+      while latest == previous {
+        latest = try await resultsA.next()!
       }
+      #expect(latest == (1...i).map { Message(author: "Client B", body: "Message \($0)") })
     }
-
-    Task {
-      // Sort of a hack - first wait for the initial value from the receiveTask. Otherwise
-      // this task can sometimes finish first and the receive task never gets all of the
-      // results that it expects (misses the original empty list).
-      while true {
-        if receivedMessages.count == 1 {
-          break
-        }
-        await Task.yield()
-      }
-      for i in 1...3 {
-        try await clientB.mutation(
-          "messages:send", with: ["author": "Client B", "body": "Message \(i)"])
-      }
-    }
-
-    await receiveTask.value
-
-    #expect(receivedMessages.count == 4)
-    #expect(receivedMessages[0] == [])
-    #expect(receivedMessages[1] == [Message(author: "Client B", body: "Message 1")])
-    #expect(
-      receivedMessages[2] == [
-        Message(author: "Client B", body: "Message 1"),
-        Message(author: "Client B", body: "Message 2"),
-      ])
-    #expect(
-      receivedMessages[3] == [
-        Message(author: "Client B", body: "Message 1"),
-        Message(author: "Client B", body: "Message 2"),
-        Message(author: "Client B", body: "Message 3"),
-      ])
   }
 
   @Test func can_round_trip_max_value_args() async throws {
@@ -163,23 +216,26 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
   @Test func can_observe_websocket_state() async throws {
     let client = ConvexClient(deploymentUrl: deploymentUrl)
 
-    let publisher = client.watchWebSocketState()
-      
+    // The client connects on its first call, so collecting with `sink` beforehand sees every state
+    // change. States arrive on a background thread.
+    let lock = NSLock()
     var states: [WebSocketState] = []
-    let receiveTask = Task {
-      for await state in publisher.prefix(2).values {
-        states.append(state)
-      }
+    let cancellable = client.watchWebSocketState().sink { state in
+      lock.withLock { states.append(state) }
     }
-    
+
     try await client.mutation("messages:clearAll")
 
-    await receiveTask.value
-    
-    #expect(states == [.connecting, .connected])
+    let deadline = Date().addingTimeInterval(5)
+    while lock.withLock({ states.count }) < 2 && Date() < deadline {
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    cancellable.cancel()
+    #expect(lock.withLock { Array(states.prefix(2)) } == [.connecting, .connected])
   }
 }
 
+/// Thrown when a publisher doesn't publish a value in time.
 private struct TimedOut: Error {}
 
 extension Publisher {
@@ -199,7 +255,7 @@ extension Publisher {
   }
 }
 
-private struct Message: Decodable, Equatable {
+private struct Message: Codable, Equatable {
   let author: String
   let body: String
 }

@@ -312,6 +312,187 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertEqual(fakeFfiClient.mutationCalls, ["nullResult"])
   }
 
+  func testOptimisticUpdateSetsQueryAndRunsMutation() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("notes:list", ["channel": "\"a\""])] =
+      "[{\"body\":\"first\",\"likes\":{\"$integer\":\"AQAAAAAAAAA=\"}}]"
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    let message: Message = try await client.mutation(
+      "foo", with: ["anInt": 101],
+      optimisticUpdate: { store in
+        let notes: [Note] = try store.getQuery("notes:list", with: ["channel": "a"]) ?? []
+        try store.setQuery(
+          "notes:list", with: ["channel": "a"], to: notes + [Note(body: "second", likes: 0)])
+      })
+
+    XCTAssertEqual(message.val, 101)
+    XCTAssertEqual(fakeFfiClient.mutationCalls, ["foo"])
+    let notes = try JSONDecoder().decode(
+      [Note].self,
+      from: Data(
+        fakeFfiClient.optimisticStore.values[
+          FakeOptimisticLocalStore.key("notes:list", ["channel": "\"a\""])]!!.utf8))
+    XCTAssertEqual(notes, [Note(body: "first", likes: 1), Note(body: "second", likes: 0)])
+  }
+
+  func testOptimisticUpdateGetAllQueriesArgsRoundTrip() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("counter:get", ["name": "\"a\""])] = "1"
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("counter:get", ["name": "\"b\""])] = "2"
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    // Optimistic updates are `@Sendable`, so collect names through a lock.
+    let names = Locked<[String]>([])
+    try await client.mutation(
+      "nullResult",
+      optimisticUpdate: { store in
+        for query in try store.getAllQueries("counter:get", yielding: Double.self) {
+          let name = try query.decodeArgs(as: CounterArgs.self).name
+          names.withLock { $0.append(name) }
+          try store.setQuery("counter:get", with: query.args, to: query.value! + 10)
+        }
+        try store.setQueryLoading("other:query")
+      })
+
+    XCTAssertEqual(names.withLock { $0 }.sorted(), ["a", "b"])
+    let values = fakeFfiClient.optimisticStore.values
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("counter:get", ["name": "\"a\""])], "11")
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("counter:get", ["name": "\"b\""])], "12")
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("other:query", [:])], .some(nil))
+  }
+
+  /// Sets `serverValue` as the result of `name` in a fake store, applies `update` to it and returns
+  /// the value the update set.
+  private func applyOptimisticUpdate(
+    to name: String, withServerValue serverValue: String,
+    _ update: @escaping OptimisticUpdate
+  ) async throws -> String {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let key = FakeOptimisticLocalStore.key(name, [:])
+    fakeFfiClient.optimisticStore.values[key] = serverValue
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+    try await client.mutation("nullResult", optimisticUpdate: update)
+    return try XCTUnwrap(fakeFfiClient.optimisticStore.values[key] ?? nil)
+  }
+
+  func testOptimisticTopLevelIntRoundTripsAsJsNumber() async throws {
+    // The server sends a JavaScript number (a Float64) as a JSON number.
+    let set = try await applyOptimisticUpdate(to: "counter:get", withServerValue: "5.0") { store in
+      let count: Int = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: count + 1)
+    }
+
+    XCTAssertEqual(set, "6")
+    XCTAssertEqual(try JSONDecoder().decode(Int.self, from: Data(set.utf8)), 6)
+  }
+
+  func testOptimisticNestedIntRoundTripsAsJsNumber() async throws {
+    let set = try await applyOptimisticUpdate(
+      to: "counter:get", withServerValue: "{\"count\":5.0}"
+    ) { store in
+      let counter: Counter = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: Counter(count: counter.count + 1))
+    }
+
+    XCTAssertEqual(set, "{\"count\":6}")
+    XCTAssertEqual(try JSONDecoder().decode(Counter.self, from: Data(set.utf8)), Counter(count: 6))
+  }
+
+  func testOptimisticDoubleRoundTripsAsJsNumber() async throws {
+    let set = try await applyOptimisticUpdate(to: "counter:get", withServerValue: "1.5") { store in
+      let value: Double = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: value + 1)
+    }
+
+    XCTAssertEqual(set, "2.5")
+    XCTAssertEqual(try JSONDecoder().decode(Double.self, from: Data(set.utf8)), 2.5)
+  }
+
+  func testOptimisticConvexIntRoundTripsAsInt64() async throws {
+    // The server sends an Int64 (a JavaScript bigint) as an `$integer` object.
+    let set = try await applyOptimisticUpdate(
+      to: "notes:get", withServerValue: "{\"body\":\"a\",\"likes\":{\"$integer\":\"BQAAAAAAAAA=\"}}"
+    ) { store in
+      let note: Note = try store.getQuery("notes:get")!
+      try store.setQuery("notes:get", to: Note(body: note.body, likes: note.likes + 1))
+    }
+
+    let json = try JSONSerialization.jsonObject(with: Data(set.utf8)) as! [String: Any]
+    XCTAssertEqual(json["likes"] as? [String: String], ["$integer": "BgAAAAAAAAA="])
+    XCTAssertEqual(
+      try JSONDecoder().decode(Note.self, from: Data(set.utf8)), Note(body: "a", likes: 6))
+  }
+
+  func testOptimisticTopLevelConvexIntRoundTripsAsInt64() async throws {
+    let set = try await applyOptimisticUpdate(
+      to: "counter:get", withServerValue: "{\"$integer\":\"BQAAAAAAAAA=\"}"
+    ) { store in
+      let count: ConvexInt<Int> = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: ConvexInt(wrappedValue: count.wrappedValue + 1))
+    }
+
+    XCTAssertEqual(set, "{\"$integer\":\"BgAAAAAAAAA=\"}")
+  }
+
+  func testThrowingOptimisticUpdateFailsMutationWithItsError() async throws {
+    struct BadUpdate: Error {}
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    do {
+      try await client.mutation(
+        "nullResult",
+        optimisticUpdate: { store in
+          try store.setQuery("counter:get", to: 1)
+          throw BadUpdate()
+        })
+      XCTFail("mutation should have thrown")
+    } catch is BadUpdate {}
+
+    XCTAssertEqual(fakeFfiClient.mutationCalls, [])
+    XCTAssertEqual(fakeFfiClient.optimisticUpdateApplyCount, 1)
+  }
+
+  func testOptimisticUpdateErrorsCrossTheFfiAsClientErrors() throws {
+    struct BadUpdate: Error {}
+    let adapter = OptimisticUpdateAdapter(update: { _ in throw BadUpdate() })
+
+    XCTAssertThrowsError(try adapter.apply(store: FakeOptimisticLocalStore())) { error in
+      guard case ClientError.InternalError = error else {
+        return XCTFail("expected an InternalError, got \(error)")
+      }
+    }
+  }
+
+  func testConvexNumberWrappersEncodeToConvexJson() throws {
+    let encoded = try JSONEncoder().encode(
+      NumberWrappers(int: 42, optionalInt: nil, float: .infinity, optionalFloat: 1.5))
+    let json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+
+    XCTAssertEqual(json["int"] as? [String: String], ["$integer": "KgAAAAAAAAA="])
+    XCTAssertNil(json["optionalInt"])
+    XCTAssertEqual(json["float"] as? [String: String], ["$float": "AAAAAAAA8H8="])
+    XCTAssertEqual(json["optionalFloat"] as? Double, 1.5)
+    XCTAssertEqual(
+      try JSONDecoder().decode(NumberWrappers.self, from: encoded),
+      NumberWrappers(int: 42, optionalInt: nil, float: .infinity, optionalFloat: 1.5))
+  }
+
+  func testConvexIntEncodesUnsignedValuesAboveInt64MaxByBitPattern() throws {
+    let encoded = try JSONEncoder().encode(ConvexInt<UInt64>(wrappedValue: UInt64.max))
+
+    let json = try JSONSerialization.jsonObject(with: encoded) as! [String: String]
+
+    // -1 as an Int64.
+    XCTAssertEqual(json, ["$integer": "//////////8="])
+    XCTAssertEqual(
+      try JSONDecoder().decode(ConvexInt<UInt64>.self, from: encoded).wrappedValue, UInt64.max)
+  }
+
   func testActionRoundTrip() async throws {
     let fakeFfiClient = FakeMobileConvexClient()
     let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
@@ -658,6 +839,18 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     return "{\"_id\": \"the_id\", \"val\": \(receivedConvexInt), \"extra\": null}"
   }
 
+  let optimisticStore = FakeOptimisticLocalStore()
+  var optimisticUpdateApplyCount = 0
+
+  func mutationWithOptimisticUpdate(
+    name: String, args: [String: String], optimisticUpdate: any MobileOptimisticUpdate
+  ) async throws -> String {
+    optimisticUpdateApplyCount += 1
+    // Like the Rust client, don't send the mutation if the update fails when it's called.
+    try optimisticUpdate.apply(store: optimisticStore)
+    return try await mutation(name: name, args: args)
+  }
+
   func query(name: String, args: [String: String]) async throws -> String {
     return "foo"
   }
@@ -767,6 +960,85 @@ class FakeSubscriptionHandle: UniFFI.SubscriptionHandle {
   override func cancel() {
     self.client.cancellationCount += 1
   }
+}
+
+/// An in-memory stand-in for the Rust optimistic update store, keyed by query name and JSON args.
+class FakeOptimisticLocalStore: UniFFI.MobileOptimisticLocalStore {
+  /// A `nil` value means the query was set to loading.
+  var values: [String: String?] = [:]
+
+  init() {
+    super.init(noPointer: UniFFI.MobileOptimisticLocalStore.NoPointer())
+  }
+
+  required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+    fatalError("init(unsafeFromRawPointer:) has not been implemented")
+  }
+
+  static func key(_ name: String, _ args: [String: String]) -> String {
+    let sortedArgs = args.keys.sorted().map { "\($0)=\(args[$0]!)" }.joined(separator: ",")
+    return "\(name)(\(sortedArgs))"
+  }
+
+  override func getQuery(name: String, args: [String: String]) throws -> String? {
+    values[Self.key(name, args)] ?? nil
+  }
+
+  override func getAllQueries(name: String) throws -> [MobileOptimisticQuery] {
+    values.compactMap { key, value in
+      guard key.hasPrefix("\(name)(") else { return nil }
+      let argsString = key.dropFirst(name.count + 1).dropLast()
+      var args: [String: String] = [:]
+      for pair in argsString.split(separator: ",") {
+        let parts = pair.split(separator: "=", maxSplits: 1)
+        args[String(parts[0])] = String(parts[1])
+      }
+      return MobileOptimisticQuery(args: args, value: value)
+    }
+  }
+
+  override func setQuery(name: String, args: [String: String], value: String?) throws {
+    values[Self.key(name, args)] = .some(value)
+  }
+}
+
+private struct Note: Codable, Equatable {
+  let body: String
+  @ConvexInt
+  var likes: Int
+}
+
+/// A value guarded by a lock, for state shared with `@Sendable` closures.
+private final class Locked<Value>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Value
+
+  init(_ value: Value) {
+    self.value = value
+  }
+
+  func withLock<R>(_ body: (inout Value) throws -> R) rethrows -> R {
+    try lock.withLock { try body(&value) }
+  }
+}
+
+private struct Counter: Codable, Equatable {
+  let count: Int
+}
+
+private struct CounterArgs: Decodable {
+  let name: String
+}
+
+private struct NumberWrappers: Codable, Equatable {
+  @ConvexInt
+  var int: Int
+  @OptionalConvexInt
+  var optionalInt: Int?
+  @ConvexFloat
+  var float: Double
+  @OptionalConvexFloat
+  var optionalFloat: Double?
 }
 
 private struct MessageWithOptionalVal: Decodable {
