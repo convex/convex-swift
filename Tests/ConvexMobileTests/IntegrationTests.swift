@@ -8,6 +8,7 @@
 import Combine
 import Foundation
 import ConvexMobile
+import SQLite3
 import Testing
 
 private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
@@ -163,7 +164,7 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     #expect(try await offlineResults.next() == expected)
 
     try await offline.clearQueryCache()
-    #expect(cachedFiles(in: cacheDirectory).isEmpty)
+    #expect(try cachedQueryCount(in: cacheDirectory) == 0)
   }
 
   @Test func cached_results_are_shown_offline_when_signed_in_with_an_expired_token() async throws {
@@ -171,7 +172,9 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     defer { try? FileManager.default.removeItem(at: cacheDirectory) }
     let expected = [Message(author: "Cache", body: "Signed in")]
     try await cacheMessages(expected, in: cacheDirectory)
-    try moveCachedResults(in: cacheDirectory, to: offlineDeploymentUrl)
+    // Results are only shown to the user they were fetched for: make these that user's.
+    try moveCachedResults(
+      in: cacheDirectory, to: offlineDeploymentUrl, scope: OfflineAuthProvider.expiredTokenScope)
 
     // Apps commonly wait until they're signed in to subscribe, so signing in offline must succeed
     // for cached results to show.
@@ -193,16 +196,28 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
   /// A deployment URL that can't be reached, standing in for this test's deployment while offline.
   private let offlineDeploymentUrl = "https://offline.invalid/"
 
-  /// Cached results are only restored for the deployment they came from, so make the results in
-  /// `directory` look like they came from `deploymentUrl`.
-  private func moveCachedResults(in directory: URL, to deploymentUrl: String) throws {
-    for file in cachedFiles(in: directory) {
-      let url = directory.appendingPathComponent(file)
-      var file = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
-      var query = file["query"] as! [String: Any]
-      query["deploymentUrl"] = deploymentUrl
-      file["query"] = query
-      try JSONSerialization.data(withJSONObject: file).write(to: url)
+  /// Cached results are only restored for the deployment they came from (and for the user they
+  /// were fetched for), so make the results in `directory` look like they came from
+  /// `deploymentUrl` (for the user with `scope`).
+  private func moveCachedResults(
+    in directory: URL, to deploymentUrl: String, scope: String? = nil
+  ) throws {
+    let sql =
+      scope == nil
+      ? "UPDATE query_cache SET query = json_set(query, '$.deploymentUrl', ?1)"
+      : "UPDATE query_cache SET query = json_set(query, '$.deploymentUrl', ?1, '$.scope', ?2)"
+    try withCacheDatabase(in: directory) { db in
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw CacheDatabaseError(message: String(cString: sqlite3_errmsg(db)))
+      }
+      defer { sqlite3_finalize(statement) }
+      let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+      sqlite3_bind_text(statement, 1, deploymentUrl, -1, transient)
+      if let scope { sqlite3_bind_text(statement, 2, scope, -1, transient) }
+      guard sqlite3_step(statement) == SQLITE_DONE else {
+        throw CacheDatabaseError(message: String(cString: sqlite3_errmsg(db)))
+      }
     }
   }
 
@@ -211,10 +226,34 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
       .appendingPathComponent("convex-query-cache-\(UUID().uuidString)", isDirectory: true)
   }
 
-  /// Cache files in `directory`. Saves write a temporary file first, so only finished files count.
-  private func cachedFiles(in directory: URL) -> [String] {
-    ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
-      .filter { $0.hasSuffix(".convexquery") }
+  private struct CacheDatabaseError: Error { let message: String }
+
+  /// Opens the query cache database in `directory` (written by the client's SQLite storage).
+  private func withCacheDatabase<R>(in directory: URL, _ body: (OpaquePointer) throws -> R) throws
+    -> R
+  {
+    var db: OpaquePointer?
+    let path = directory.appendingPathComponent("query-cache.sqlite").path
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db else {
+      sqlite3_close(db)
+      throw CacheDatabaseError(message: "can't open \(path)")
+    }
+    defer { sqlite3_close(db) }
+    return try body(db)
+  }
+
+  /// How many query results are saved in the cache in `directory`.
+  private func cachedQueryCount(in directory: URL) throws -> Int {
+    guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("query-cache.sqlite").path)
+    else { return 0 }
+    return try withCacheDatabase(in: directory) { db in
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM query_cache", -1, &statement, nil) == SQLITE_OK
+      else { return 0 }  // Not created yet.
+      defer { sqlite3_finalize(statement) }
+      guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+      return Int(sqlite3_column_int64(statement, 0))
+    }
   }
 
   /// Sends `messages` and waits until a client with a cache in `directory` has saved them as the
@@ -231,10 +270,10 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
 
     // Saves happen in the background at most every 500ms.
     let deadline = Date().addingTimeInterval(5)
-    while cachedFiles(in: directory).isEmpty && Date() < deadline {
+    while (try? cachedQueryCount(in: directory)) ?? 0 == 0 && Date() < deadline {
       try await Task.sleep(nanoseconds: 50_000_000)
     }
-    #expect(!cachedFiles(in: directory).isEmpty)
+    #expect(try cachedQueryCount(in: directory) > 0)
   }
 
   @Test func send_and_receive_multiple_messages() async throws {
@@ -428,7 +467,11 @@ private struct NullableFloats: Decodable, Equatable {
 /// An ``AuthProvider`` whose stored token has expired and can't be refreshed because the device is
 /// offline. It returns the stored credentials anyway, as providers should for cached results to show.
 private final class OfflineAuthProvider: AuthProvider {
-  static let expiredToken = "expired-token"
+  /// An expired JWT (unsigned: the client only reads its claims, to tell users apart).
+  static let expiredToken =
+    "eyJhbGciOiJub25lIn0.eyJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZSIsInN1YiI6InVzZXItMSIsImV4cCI6MX0."
+  /// The query cache's scope for results fetched with ``expiredToken``.
+  static let expiredTokenScope = "user:https://auth.example|user-1"
 
   func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
     do {
