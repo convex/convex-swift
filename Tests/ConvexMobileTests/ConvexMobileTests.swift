@@ -51,6 +51,60 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertEqual(result?.val, 42)
   }
 
+  func testSubscribeWithCacheInfoSaysWhichResultsAreCached() async throws {
+    struct Count: Decodable, Equatable { let n: Int }
+    let expectation = self.expectation(description: "subscribe")
+    expectation.expectedFulfillmentCount = 2
+    var updates: [QueryUpdate<Count>] = []
+    let client = ConvexMobile.ConvexClient(ffiClient: FakeMobileConvexClient())
+
+    let cancellationHandle = client.subscribeWithCacheInfo(to: "cachedThenFresh", yielding: Count.self)
+      .sink(
+        receiveCompletion: { _ in },
+        receiveValue: { update in
+          updates.append(update)
+          expectation.fulfill()
+        })
+
+    await fulfillment(of: [expectation], timeout: 10)
+    cancellationHandle.cancel()
+    XCTAssertEqual(
+      updates,
+      [
+        QueryUpdate(value: Count(n: 1), cachedAt: Date(timeIntervalSince1970: 1_767_225_600)),
+        QueryUpdate(value: Count(n: 1), cachedAt: nil),
+      ])
+    XCTAssertTrue(updates[0].isCached)
+    XCTAssertFalse(updates[1].isCached)
+  }
+
+  func testQueryCacheOptionsReachTheFfiClient() {
+    let options = QueryCacheOptions(
+      directory: URL(fileURLWithPath: "/tmp/cache", isDirectory: true), capacity: 50, maxAge: 1.5,
+      sharedQueries: ["products:list", "config:get"], keepResultsOnError: true)
+    let config = options.ffiConfig
+    XCTAssertEqual(config.directory, "/tmp/cache")
+    XCTAssertEqual(config.capacity, 50)
+    XCTAssertEqual(config.maxAgeMs, 1500)
+    XCTAssertEqual(config.sharedQueries, ["config:get", "products:list"])
+    XCTAssertTrue(config.keepResultsOnError)
+
+    let defaults = QueryCacheOptions(directory: URL(fileURLWithPath: "/tmp/cache")).ffiConfig
+    XCTAssertNil(defaults.capacity)
+    XCTAssertNil(defaults.maxAgeMs)
+    XCTAssertEqual(defaults.sharedQueries, [])
+    XCTAssertFalse(defaults.keepResultsOnError)
+  }
+
+  func testFlushQueryCacheCallsFfiClient() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    try await client.flushQueryCache()
+
+    XCTAssertEqual(fakeFfiClient.flushQueryCacheCount, 1)
+  }
+
   func testClearQueryCacheCallsFfiClient() async throws {
     let fakeFfiClient = FakeMobileConvexClient()
     let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
@@ -945,6 +999,12 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     clearQueryCacheLock.withLock { _clearQueryCacheCount += 1 }
   }
 
+  var flushQueryCacheCount = 0
+
+  func flushQueryCache() async throws {
+    flushQueryCacheCount += 1
+  }
+
   let optimisticStore = FakeOptimisticLocalStore()
   var optimisticUpdateApplyCount = 0
 
@@ -981,29 +1041,40 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     if name == "slowStart" {
       try await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
     }
+    if name == "cachedThenFresh" {
+      // A result restored from the cache (sent by the server at 2026-01-01T00:00:00Z), then the
+      // server's, with the same value.
+      subscriber.onUpdate(value: "{\"n\": 1}", cachedServerTs: 1_767_225_600_000_000_000)
+      let _ = Task {
+        try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
+        subscriber.onUpdate(value: "{\"n\": 1}", cachedServerTs: nil)
+      }
+      return FakeSubscriptionHandle(client: self)
+    }
     if name == "immediate" {
       subscriber.onUpdate(
-        value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+        value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}", cachedServerTs: nil)
       return FakeSubscriptionHandle(client: self)
     }
     let _ = Task {
       try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
       if name == "typeMismatch" {
         subscriber.onUpdate(
-          value: "\"just a plain string\"")
+          value: "\"just a plain string\"", cachedServerTs: nil)
       } else if name == "missingVal" {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"extra\": null}", cachedServerTs: nil)
       } else if name == "nullVal" {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"val\": null, \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"val\": null, \"extra\": null}", cachedServerTs: nil)
       } else {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}", cachedServerTs: nil)
         if name == "dupeVals" {
           subscriber.onUpdate(
             value:
-              "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+              "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}",
+            cachedServerTs: nil)
         }
       }
       resultPublished?.fulfill()

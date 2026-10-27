@@ -27,11 +27,25 @@ public class ConvexClient {
   ///     to whoever was signed in, so call ``clearQueryCache()`` when the user signs out or another
   ///     user signs in (``ConvexClientWithAuth`` does this for you). Only query results are cached:
   ///     files they refer to, such as image URLs from storage, need their own cache to show offline.
+  ///     For more settings, use ``init(deploymentUrl:queryCache:)``.
   public init(deploymentUrl: String, queryCacheDirectory: URL? = nil) {
     self.ffiClient = UniFFI.MobileConvexClient(
       deploymentUrl: deploymentUrl, clientId: "swift-\(convexMobileVersion)",
       webSocketStateSubscriber: webSocketStateAdapter,
-      queryCacheDirectory: queryCacheDirectory?.path)
+      queryCache: queryCacheDirectory.map { QueryCacheOptions(directory: $0).ffiConfig })
+  }
+
+  /// Creates a new instance of ``ConvexClient`` that caches query results with the given settings.
+  ///
+  /// - Parameters:
+  ///   - deploymentUrl: The Convex backend URL to connect to; find it in the [dashboard](https://dashboard.convex.dev) Settings for your project
+  ///   - queryCache: Where and how to keep the latest query results; see ``QueryCacheOptions`` and
+  ///     ``init(deploymentUrl:queryCacheDirectory:)``. `nil` caches nothing.
+  public init(deploymentUrl: String, queryCache: QueryCacheOptions?) {
+    self.ffiClient = UniFFI.MobileConvexClient(
+      deploymentUrl: deploymentUrl, clientId: "swift-\(convexMobileVersion)",
+      webSocketStateSubscriber: webSocketStateAdapter,
+      queryCache: queryCache?.ffiConfig)
   }
 
   /// Returns a directory for caching query results from `deploymentUrl`, for use with
@@ -101,6 +115,14 @@ public class ConvexClient {
     try await ffiClient.clearQueryCache()
   }
 
+  /// Waits until the query results cached so far are saved, for example before the app is
+  /// suspended. Results are otherwise saved in the background, at most every half second.
+  ///
+  /// Does nothing if the client was created without a query cache.
+  public func flushQueryCache() async throws {
+    try await ffiClient.flushQueryCache()
+  }
+
   init(ffiClient: UniFFI.MobileConvexClientProtocol) {
     self.ffiClient = ffiClient
   }
@@ -125,6 +147,16 @@ public class ConvexClient {
   public func subscribe<T: Decodable>(
     to name: String, with args: [String: ConvexEncodable?]? = nil, yielding output: T.Type? = nil
   ) -> AnyPublisher<T, ClientError> {
+    subscribeWithCacheInfo(to: name, with: args, yielding: output)
+      .map(\.value)
+      .eraseToAnyPublisher()
+  }
+
+  /// Like ``subscribe(to:with:yielding:)``, but each result says whether it was restored from the
+  /// query cache (see ``QueryUpdate``), for example to show that it may be out of date.
+  public func subscribeWithCacheInfo<T: Decodable>(
+    to name: String, with args: [String: ConvexEncodable?]? = nil, yielding output: T.Type? = nil
+  ) -> AnyPublisher<QueryUpdate<T>, ClientError> {
     // There are two steps to producing the final Publisher in this method.
     // 1. Subscribe to the data from Convex and publish the subscription handle
     // 2. Publish the Convex data once subscribed, and cancel the upstream subscription when
@@ -132,7 +164,7 @@ public class ConvexClient {
 
     // This Publisher will ultimately publish the data received from Convex. It keeps the latest value
     // because the first one, such as a cached result, can arrive before the flatMap below subscribes.
-    let convexPublisher = CurrentValueSubject<T?, ClientError>(nil)
+    let convexPublisher = CurrentValueSubject<QueryUpdate<T>?, ClientError>(nil)
     let adapter = SubscriptionAdapter<T>(publisher: convexPublisher)
 
     // Cancels the upstream subscription, even if consumers stop listening before it has started.
@@ -570,6 +602,17 @@ public class ConvexClientWithAuth<T>: ConvexClient {
     super.init(deploymentUrl: deploymentUrl, queryCacheDirectory: queryCacheDirectory)
   }
 
+  /// Creates a new instance of ``ConvexClientWithAuth`` that caches query results with the given
+  /// settings; see ``init(deploymentUrl:authProvider:queryCacheDirectory:)`` and
+  /// ``QueryCacheOptions``.
+  public init(
+    deploymentUrl: String, authProvider: any AuthProvider<T>, queryCache: QueryCacheOptions?
+  ) {
+    self.authProvider = authProvider
+    self.authState = authSession.authState
+    super.init(deploymentUrl: deploymentUrl, queryCache: queryCache)
+  }
+
   init(ffiClient: MobileConvexClientProtocol, authProvider: any AuthProvider<T>) {
     self.authProvider = authProvider
     self.authState = authSession.authState
@@ -693,7 +736,7 @@ private final class SubscriptionHandleBox: @unchecked Sendable {
 }
 
 private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
-  typealias Publisher = CurrentValueSubject<T?, ClientError>
+  typealias Publisher = CurrentValueSubject<QueryUpdate<T>?, ClientError>
 
   let publisher: Publisher
 
@@ -712,12 +755,16 @@ private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
       completion: Subscribers.Completion.failure(err))
   }
 
-  func onUpdate(value: String) {
+  func onUpdate(value: String, cachedServerTs: UInt64?) {
     // Values from the server and values set by optimistic updates arrive the same way, so a value
     // that can't be decoded ends the subscription either way. `OptimisticLocalStore.setQuery`
     // encodes values the way they're decoded here, so values derived from server results decode.
     do {
-      publisher.send(try JSONDecoder().decode(T.self, from: Data(value.utf8)))
+      let decoded = try JSONDecoder().decode(T.self, from: Data(value.utf8))
+      publisher.send(
+        QueryUpdate(
+          value: decoded,
+          cachedAt: cachedServerTs.map { Date(timeIntervalSince1970: Double($0) / 1_000_000_000) }))
     } catch {
       publisher.send(
         completion: .failure(ClientError.InternalError(msg: error.localizedDescription)))
@@ -738,3 +785,58 @@ private class WebSocketStateAdapter: WebSocketStateSubscriber {
     return subject.eraseToAnyPublisher()
   }
 }
+
+/// Where and how ``ConvexClient`` keeps query results across launches.
+public struct QueryCacheOptions: Sendable, Equatable {
+  /// The directory for the cache's database file, for example
+  /// ``ConvexClient/defaultQueryCacheDirectory(for:)``. Use one directory per client.
+  public var directory: URL
+  /// How many query results to keep, evicting those the server sent least recently. `nil` keeps
+  /// the default, 1000.
+  public var capacity: Int?
+  /// Don't restore results the server sent longer ago than this. `nil` restores them however old
+  /// they are.
+  public var maxAge: TimeInterval?
+  /// Names ("module:function") of queries whose results are the same for every user. They're shown
+  /// whoever is signed in and kept when users sign out. Only list queries that don't read
+  /// `ctx.auth`, or one user's results will be shown to another.
+  public var sharedQueries: Set<String>
+  /// Keep a query's cached result when the server reports an error for it, so it's still restored
+  /// in later launches, for example when the error is because a token expired. By default it's
+  /// deleted.
+  public var keepResultsOnError: Bool
+
+  public init(
+    directory: URL, capacity: Int? = nil, maxAge: TimeInterval? = nil,
+    sharedQueries: Set<String> = [], keepResultsOnError: Bool = false
+  ) {
+    self.directory = directory
+    self.capacity = capacity
+    self.maxAge = maxAge
+    self.sharedQueries = sharedQueries
+    self.keepResultsOnError = keepResultsOnError
+  }
+
+  var ffiConfig: UniFFI.QueryCacheConfig {
+    UniFFI.QueryCacheConfig(
+      directory: directory.path,
+      capacity: capacity.map { UInt32(clamping: $0) },
+      maxAgeMs: maxAge.map { UInt64(max(0, $0 * 1000)) },
+      sharedQueries: sharedQueries.sorted(),
+      keepResultsOnError: keepResultsOnError)
+  }
+}
+
+/// A query result from ``ConvexClient/subscribeWithCacheInfo(to:with:yielding:)``.
+public struct QueryUpdate<T> {
+  public let value: T
+  /// Set when ``value`` was restored from the query cache and the server hasn't confirmed it since
+  /// launch: when the server last sent it. Once the server sends its result, the subscription
+  /// publishes it with `cachedAt` `nil`, even if the value is the same.
+  public let cachedAt: Date?
+  /// Whether ``value`` was restored from the query cache and may be out of date.
+  public var isCached: Bool { cachedAt != nil }
+}
+
+extension QueryUpdate: Sendable where T: Sendable {}
+extension QueryUpdate: Equatable where T: Equatable {}

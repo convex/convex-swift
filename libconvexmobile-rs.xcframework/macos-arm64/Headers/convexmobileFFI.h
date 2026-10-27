@@ -273,7 +273,7 @@ typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod0)(uint64_t, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD1
-typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod1)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -350,7 +350,7 @@ void uniffi_convexmobile_fn_free_mobileconvexclient(void*_Nonnull ptr, RustCallS
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CONSTRUCTOR_MOBILECONVEXCLIENT_NEW
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CONSTRUCTOR_MOBILECONVEXCLIENT_NEW
-void*_Nonnull uniffi_convexmobile_fn_constructor_mobileconvexclient_new(RustBuffer deployment_url, RustBuffer client_id, RustBuffer web_socket_state_subscriber, RustBuffer query_cache_directory, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_convexmobile_fn_constructor_mobileconvexclient_new(RustBuffer deployment_url, RustBuffer client_id, RustBuffer web_socket_state_subscriber, RustBuffer query_cache, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_ACTION
@@ -361,6 +361,11 @@ uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_action(void*_Nonnull p
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
 uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_clear_query_cache(void*_Nonnull ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_flush_query_cache(void*_Nonnull ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_MUTATION
@@ -460,7 +465,7 @@ void uniffi_convexmobile_fn_method_querysubscriber_on_error(void*_Nonnull ptr, R
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_QUERYSUBSCRIBER_ON_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_QUERYSUBSCRIBER_ON_UPDATE
-void uniffi_convexmobile_fn_method_querysubscriber_on_update(void*_Nonnull ptr, RustBuffer value, RustCallStatus *_Nonnull out_status
+void uniffi_convexmobile_fn_method_querysubscriber_on_update(void*_Nonnull ptr, RustBuffer value, RustBuffer cached_server_ts, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_SUBSCRIPTIONHANDLE
@@ -805,6 +810,12 @@ uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_action(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
 uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_clear_query_cache(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_flush_query_cache(void
     
 );
 #endif

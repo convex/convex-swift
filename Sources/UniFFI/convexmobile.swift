@@ -382,6 +382,32 @@ fileprivate class UniffiHandleMap<T> {
 // Public interface members begin here.
 
 
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -635,6 +661,8 @@ public protocol MobileConvexClientProtocol : AnyObject {
     
     func clearQueryCache() async throws 
     
+    func flushQueryCache() async throws 
+    
     func mutation(name: String, args: [String: String]) async throws  -> String
     
     func mutationWithOptimisticUpdate(name: String, args: [String: String], optimisticUpdate: MobileOptimisticUpdate) async throws  -> String
@@ -677,14 +705,14 @@ open class MobileConvexClient:
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
         return try! rustCall { uniffi_convexmobile_fn_clone_mobileconvexclient(self.pointer, $0) }
     }
-public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?, queryCacheDirectory: String?) {
+public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?, queryCache: QueryCacheConfig?) {
     let pointer =
         try! rustCall() {
     uniffi_convexmobile_fn_constructor_mobileconvexclient_new(
         FfiConverterString.lower(deploymentUrl),
         FfiConverterString.lower(clientId),
         FfiConverterOptionTypeWebSocketStateSubscriber.lower(webSocketStateSubscriber),
-        FfiConverterOptionString.lower(queryCacheDirectory),$0
+        FfiConverterOptionTypeQueryCacheConfig.lower(queryCache),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -723,6 +751,23 @@ open func clearQueryCache()async throws  {
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_convexmobile_fn_method_mobileconvexclient_clear_query_cache(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_convexmobile_rust_future_poll_void,
+            completeFunc: ffi_convexmobile_rust_future_complete_void,
+            freeFunc: ffi_convexmobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeClientError.lift
+        )
+}
+    
+open func flushQueryCache()async throws  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_convexmobile_fn_method_mobileconvexclient_flush_query_cache(
                     self.uniffiClonePointer()
                     
                 )
@@ -1165,7 +1210,7 @@ public protocol QuerySubscriber : AnyObject {
     
     func onError(message: String, value: String?) 
     
-    func onUpdate(value: String) 
+    func onUpdate(value: String, cachedServerTs: UInt64?) 
     
 }
 
@@ -1218,9 +1263,10 @@ open func onError(message: String, value: String?) {try! rustCall() {
 }
 }
     
-open func onUpdate(value: String) {try! rustCall() {
+open func onUpdate(value: String, cachedServerTs: UInt64?) {try! rustCall() {
     uniffi_convexmobile_fn_method_querysubscriber_on_update(self.uniffiClonePointer(),
-        FfiConverterString.lower(value),$0
+        FfiConverterString.lower(value),
+        FfiConverterOptionUInt64.lower(cachedServerTs),$0
     )
 }
 }
@@ -1264,6 +1310,7 @@ fileprivate struct UniffiCallbackInterfaceQuerySubscriber {
         onUpdate: { (
             uniffiHandle: UInt64,
             value: RustBuffer,
+            cachedServerTs: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -1273,7 +1320,8 @@ fileprivate struct UniffiCallbackInterfaceQuerySubscriber {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.onUpdate(
-                     value: try FfiConverterString.lift(value)
+                     value: try FfiConverterString.lift(value),
+                     cachedServerTs: try FfiConverterOptionUInt64.lift(cachedServerTs)
                 )
             }
 
@@ -1653,6 +1701,87 @@ public func FfiConverterTypeMobileOptimisticQuery_lower(_ value: MobileOptimisti
 }
 
 
+public struct QueryCacheConfig {
+    public var directory: String
+    public var capacity: UInt32?
+    public var maxAgeMs: UInt64?
+    public var sharedQueries: [String]
+    public var keepResultsOnError: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(directory: String, capacity: UInt32? = nil, maxAgeMs: UInt64? = nil, sharedQueries: [String] = [], keepResultsOnError: Bool = false) {
+        self.directory = directory
+        self.capacity = capacity
+        self.maxAgeMs = maxAgeMs
+        self.sharedQueries = sharedQueries
+        self.keepResultsOnError = keepResultsOnError
+    }
+}
+
+
+
+extension QueryCacheConfig: Equatable, Hashable {
+    public static func ==(lhs: QueryCacheConfig, rhs: QueryCacheConfig) -> Bool {
+        if lhs.directory != rhs.directory {
+            return false
+        }
+        if lhs.capacity != rhs.capacity {
+            return false
+        }
+        if lhs.maxAgeMs != rhs.maxAgeMs {
+            return false
+        }
+        if lhs.sharedQueries != rhs.sharedQueries {
+            return false
+        }
+        if lhs.keepResultsOnError != rhs.keepResultsOnError {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(directory)
+        hasher.combine(capacity)
+        hasher.combine(maxAgeMs)
+        hasher.combine(sharedQueries)
+        hasher.combine(keepResultsOnError)
+    }
+}
+
+
+public struct FfiConverterTypeQueryCacheConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> QueryCacheConfig {
+        return
+            try QueryCacheConfig(
+                directory: FfiConverterString.read(from: &buf), 
+                capacity: FfiConverterOptionUInt32.read(from: &buf), 
+                maxAgeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                sharedQueries: FfiConverterSequenceString.read(from: &buf), 
+                keepResultsOnError: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: QueryCacheConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.directory, into: &buf)
+        FfiConverterOptionUInt32.write(value.capacity, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxAgeMs, into: &buf)
+        FfiConverterSequenceString.write(value.sharedQueries, into: &buf)
+        FfiConverterBool.write(value.keepResultsOnError, into: &buf)
+    }
+}
+
+
+public func FfiConverterTypeQueryCacheConfig_lift(_ buf: RustBuffer) throws -> QueryCacheConfig {
+    return try FfiConverterTypeQueryCacheConfig.lift(buf)
+}
+
+public func FfiConverterTypeQueryCacheConfig_lower(_ value: QueryCacheConfig) -> RustBuffer {
+    return FfiConverterTypeQueryCacheConfig.lower(value)
+}
+
+
 public enum ClientError {
 
     
@@ -1779,6 +1908,48 @@ extension WebSocketState: Equatable, Hashable {}
 
 
 
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1839,6 +2010,49 @@ fileprivate struct FfiConverterOptionTypeWebSocketStateSubscriber: FfiConverterR
         case 1: return try FfiConverterTypeWebSocketStateSubscriber.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+fileprivate struct FfiConverterOptionTypeQueryCacheConfig: FfiConverterRustBuffer {
+    typealias SwiftType = QueryCacheConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeQueryCacheConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeQueryCacheConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -2031,6 +2245,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_clear_query_cache() != 688) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_convexmobile_checksum_method_mobileconvexclient_flush_query_cache() != 36806) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_mutation() != 29570) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2064,7 +2281,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_querysubscriber_on_error() != 20316) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_convexmobile_checksum_method_querysubscriber_on_update() != 13905) {
+    if (uniffi_convexmobile_checksum_method_querysubscriber_on_update() != 22338) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_convexmobile_checksum_method_subscriptionhandle_cancel() != 26127) {
@@ -2073,7 +2290,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_websocketstatesubscriber_on_state_change() != 60594) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 48332) {
+    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 53660) {
         return InitializationResult.apiChecksumMismatch
     }
 
