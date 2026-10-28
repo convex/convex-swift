@@ -8,8 +8,8 @@ import Foundation
 /// A client API for interacting with a Convex backend.
 ///
 /// Handles marshalling of data between calling code and the
-/// [convex-mobile](https://github.com/get-convex/convex-mobile) and
-/// [convex-rs](https://github.com/get-convex/convex-rs) native libraries.
+/// [convex-mobile](https://github.com/convex/convex-mobile) and
+/// [convex-rs](https://github.com/convex/convex-rs) native libraries.
 ///
 /// Consumers of this client should use Swift's ``Decodable``  protocol for handling data received from the
 /// Convex backend.
