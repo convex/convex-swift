@@ -56,7 +56,7 @@ try await client.mutation("your:mutation", with: ["anotherArg": "anotherVal", "a
 ### The complete way
 
 This library depends on Rust code built in the
-[`convex-mobile`](https://github.com/get-convex/convex-mobile) project. If you are working
+[`convex-mobile`](https://github.com/convex/convex-mobile) project. If you are working
 on changes there or want to incorporate recent changes from that code into this library, you
 should clone `convex-mobile` and work with this library as a submodule.
 
