@@ -48,23 +48,33 @@ extension Float: ConvexEncodable {}
 extension Double: ConvexEncodable {}
 extension Bool: ConvexEncodable {}
 extension String: ConvexEncodable {}
-extension [String: ConvexEncodable?]: ConvexEncodable {
+extension Optional: ConvexEncodable where Wrapped: ConvexEncodable {
+    public func convexEncode() throws -> String {
+        switch self {
+        case .none:
+            "null"
+        case .some(let wrapped):
+            try wrapped.convexEncode()
+        }
+    }
+}
+extension Dictionary: ConvexEncodable where Key == String, Value == ConvexEncodable {
   public func convexEncode() throws -> String {
     var kvPairs: [String] = []
-    for key in self.keys.sorted() {
+    for key in self.keys {
       let value = self[key]
-      let encodedValue = try value??.convexEncode() ?? "null"
+      let encodedValue = try value?.convexEncode()
       kvPairs.append("\"\(key)\":\(encodedValue)")
     }
     return "{\(kvPairs.joined(separator: ","))}"
   }
 }
-extension [ConvexEncodable?]: ConvexEncodable {
-  public func convexEncode() throws -> String {
-    var encodedValues: [String] = []
-    for value in self {
-      encodedValues.append(try value?.convexEncode() ?? "null")
+extension Array: ConvexEncodable where Element: ConvexEncodable {
+    public func convexEncode() throws -> String {
+        var encodedValues: [String] = []
+        for value in self {
+            encodedValues.append(try value.convexEncode())
+        }
+        return "[\(encodedValues.joined(separator: ","))]"
     }
-    return "[\(encodedValues.joined(separator: ","))]"
-  }
 }
