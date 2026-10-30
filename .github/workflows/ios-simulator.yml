@@ -1,0 +1,49 @@
+name: iOS Simulator Tests
+
+# Builds and runs the test suite on the iOS Simulator destination. `swift test`
+# only ever exercises the macOS slice of the vendored xcframework; this job is
+# what actually verifies the library works in the iOS Simulator (i.e. that a
+# `wss://` subscription connects and resolves there, rather than "refreshing"
+# forever).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # The integration tests mutate a shared Convex test deployment, so serialize runs.
+  group: ios-simulator
+  cancel-in-progress: false
+
+jobs:
+  ios-simulator:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-15 runners default to Xcode 16+, which provides swift-testing
+      # (`import Testing`). Print it for the record.
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Pick an available iPhone simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j \
+            | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; \
+ids=[dev['udid'] for rt,devs in d.items() if 'iOS' in rt for dev in devs \
+if dev.get('isAvailable') and dev['name'].startswith('iPhone')]; \
+print(ids[-1] if ids else '')")
+          if [ -z "$udid" ]; then echo "no iOS simulator available" >&2; exit 1; fi
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid" || true
+
+      - name: Test on iOS Simulator
+        # IPHONEOS_DEPLOYMENT_TARGET is raised only for the build so the tests can
+        # use iOS 15 `AsyncPublisher.values`; the library itself still supports iOS 13.
+        run: |
+          xcodebuild test \
+            -scheme ConvexMobile \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0
