@@ -382,6 +382,32 @@ fileprivate class UniffiHandleMap<T> {
 // Public interface members begin here.
 
 
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -633,7 +659,13 @@ public protocol MobileConvexClientProtocol : AnyObject {
     
     func action(name: String, args: [String: String]) async throws  -> String
     
+    func clearQueryCache() async throws 
+    
+    func flushQueryCache() async throws 
+    
     func mutation(name: String, args: [String: String]) async throws  -> String
+    
+    func mutationWithOptimisticUpdate(name: String, args: [String: String], optimisticUpdate: MobileOptimisticUpdate) async throws  -> String
     
     func query(name: String, args: [String: String]) async throws  -> String
     
@@ -673,13 +705,14 @@ open class MobileConvexClient:
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
         return try! rustCall { uniffi_convexmobile_fn_clone_mobileconvexclient(self.pointer, $0) }
     }
-public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?) {
+public convenience init(deploymentUrl: String, clientId: String, webSocketStateSubscriber: WebSocketStateSubscriber?, queryCache: QueryCacheConfig?) {
     let pointer =
         try! rustCall() {
     uniffi_convexmobile_fn_constructor_mobileconvexclient_new(
         FfiConverterString.lower(deploymentUrl),
         FfiConverterString.lower(clientId),
-        FfiConverterOptionTypeWebSocketStateSubscriber.lower(webSocketStateSubscriber),$0
+        FfiConverterOptionTypeWebSocketStateSubscriber.lower(webSocketStateSubscriber),
+        FfiConverterOptionTypeQueryCacheConfig.lower(queryCache),$0
     )
 }
     self.init(unsafeFromRawPointer: pointer)
@@ -713,6 +746,40 @@ open func action(name: String, args: [String: String])async throws  -> String {
         )
 }
     
+open func clearQueryCache()async throws  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_convexmobile_fn_method_mobileconvexclient_clear_query_cache(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_convexmobile_rust_future_poll_void,
+            completeFunc: ffi_convexmobile_rust_future_complete_void,
+            freeFunc: ffi_convexmobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeClientError.lift
+        )
+}
+    
+open func flushQueryCache()async throws  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_convexmobile_fn_method_mobileconvexclient_flush_query_cache(
+                    self.uniffiClonePointer()
+                    
+                )
+            },
+            pollFunc: ffi_convexmobile_rust_future_poll_void,
+            completeFunc: ffi_convexmobile_rust_future_complete_void,
+            freeFunc: ffi_convexmobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeClientError.lift
+        )
+}
+    
 open func mutation(name: String, args: [String: String])async throws  -> String {
     return
         try  await uniffiRustCallAsync(
@@ -720,6 +787,23 @@ open func mutation(name: String, args: [String: String])async throws  -> String 
                 uniffi_convexmobile_fn_method_mobileconvexclient_mutation(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(name),FfiConverterDictionaryStringString.lower(args)
+                )
+            },
+            pollFunc: ffi_convexmobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_convexmobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_convexmobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeClientError.lift
+        )
+}
+    
+open func mutationWithOptimisticUpdate(name: String, args: [String: String], optimisticUpdate: MobileOptimisticUpdate)async throws  -> String {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_convexmobile_fn_method_mobileconvexclient_mutation_with_optimistic_update(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(name),FfiConverterDictionaryStringString.lower(args),FfiConverterTypeMobileOptimisticUpdate.lower(optimisticUpdate)
                 )
             },
             pollFunc: ffi_convexmobile_rust_future_poll_rust_buffer,
@@ -846,11 +930,287 @@ public func FfiConverterTypeMobileConvexClient_lower(_ value: MobileConvexClient
 
 
 
+public protocol MobileOptimisticLocalStoreProtocol : AnyObject {
+    
+    func getAllQueries(name: String) throws  -> [MobileOptimisticQuery]
+    
+    func getQuery(name: String, args: [String: String]) throws  -> String?
+    
+    func setQuery(name: String, args: [String: String], value: String?) throws 
+    
+}
+
+open class MobileOptimisticLocalStore:
+    MobileOptimisticLocalStoreProtocol {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    /// This constructor can be used to instantiate a fake object.
+    /// - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    ///
+    /// - Warning:
+    ///     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_convexmobile_fn_clone_mobileoptimisticlocalstore(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_convexmobile_fn_free_mobileoptimisticlocalstore(pointer, $0) }
+    }
+
+    
+
+    
+open func getAllQueries(name: String)throws  -> [MobileOptimisticQuery] {
+    return try  FfiConverterSequenceTypeMobileOptimisticQuery.lift(try rustCallWithError(FfiConverterTypeClientError.lift) {
+    uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_get_all_queries(self.uniffiClonePointer(),
+        FfiConverterString.lower(name),$0
+    )
+})
+}
+    
+open func getQuery(name: String, args: [String: String])throws  -> String? {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeClientError.lift) {
+    uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_get_query(self.uniffiClonePointer(),
+        FfiConverterString.lower(name),
+        FfiConverterDictionaryStringString.lower(args),$0
+    )
+})
+}
+    
+open func setQuery(name: String, args: [String: String], value: String?)throws  {try rustCallWithError(FfiConverterTypeClientError.lift) {
+    uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_set_query(self.uniffiClonePointer(),
+        FfiConverterString.lower(name),
+        FfiConverterDictionaryStringString.lower(args),
+        FfiConverterOptionString.lower(value),$0
+    )
+}
+}
+    
+
+}
+
+public struct FfiConverterTypeMobileOptimisticLocalStore: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = MobileOptimisticLocalStore
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> MobileOptimisticLocalStore {
+        return MobileOptimisticLocalStore(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: MobileOptimisticLocalStore) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileOptimisticLocalStore {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: MobileOptimisticLocalStore, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+
+
+public func FfiConverterTypeMobileOptimisticLocalStore_lift(_ pointer: UnsafeMutableRawPointer) throws -> MobileOptimisticLocalStore {
+    return try FfiConverterTypeMobileOptimisticLocalStore.lift(pointer)
+}
+
+public func FfiConverterTypeMobileOptimisticLocalStore_lower(_ value: MobileOptimisticLocalStore) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeMobileOptimisticLocalStore.lower(value)
+}
+
+
+
+
+public protocol MobileOptimisticUpdate : AnyObject {
+    
+    func apply(store: MobileOptimisticLocalStore) throws 
+    
+}
+
+open class MobileOptimisticUpdateImpl:
+    MobileOptimisticUpdate {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    /// This constructor can be used to instantiate a fake object.
+    /// - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    ///
+    /// - Warning:
+    ///     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_convexmobile_fn_clone_mobileoptimisticupdate(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_convexmobile_fn_free_mobileoptimisticupdate(pointer, $0) }
+    }
+
+    
+
+    
+open func apply(store: MobileOptimisticLocalStore)throws  {try rustCallWithError(FfiConverterTypeClientError.lift) {
+    uniffi_convexmobile_fn_method_mobileoptimisticupdate_apply(self.uniffiClonePointer(),
+        FfiConverterTypeMobileOptimisticLocalStore.lower(store),$0
+    )
+}
+}
+    
+
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceMobileOptimisticUpdate {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceMobileOptimisticUpdate = UniffiVTableCallbackInterfaceMobileOptimisticUpdate(
+        apply: { (
+            uniffiHandle: UInt64,
+            store: UnsafeMutableRawPointer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeMobileOptimisticUpdate.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.apply(
+                     store: try FfiConverterTypeMobileOptimisticLocalStore.lift(store)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeClientError.lower
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterTypeMobileOptimisticUpdate.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface MobileOptimisticUpdate: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitMobileOptimisticUpdate() {
+    uniffi_convexmobile_fn_init_callback_vtable_mobileoptimisticupdate(&UniffiCallbackInterfaceMobileOptimisticUpdate.vtable)
+}
+
+public struct FfiConverterTypeMobileOptimisticUpdate: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<MobileOptimisticUpdate>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = MobileOptimisticUpdate
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> MobileOptimisticUpdate {
+        return MobileOptimisticUpdateImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: MobileOptimisticUpdate) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileOptimisticUpdate {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: MobileOptimisticUpdate, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+
+
+public func FfiConverterTypeMobileOptimisticUpdate_lift(_ pointer: UnsafeMutableRawPointer) throws -> MobileOptimisticUpdate {
+    return try FfiConverterTypeMobileOptimisticUpdate.lift(pointer)
+}
+
+public func FfiConverterTypeMobileOptimisticUpdate_lower(_ value: MobileOptimisticUpdate) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeMobileOptimisticUpdate.lower(value)
+}
+
+
+
+
 public protocol QuerySubscriber : AnyObject {
     
     func onError(message: String, value: String?) 
     
-    func onUpdate(value: String) 
+    func onUpdate(value: String, cachedServerTs: UInt64?) 
     
 }
 
@@ -903,9 +1263,10 @@ open func onError(message: String, value: String?) {try! rustCall() {
 }
 }
     
-open func onUpdate(value: String) {try! rustCall() {
+open func onUpdate(value: String, cachedServerTs: UInt64?) {try! rustCall() {
     uniffi_convexmobile_fn_method_querysubscriber_on_update(self.uniffiClonePointer(),
-        FfiConverterString.lower(value),$0
+        FfiConverterString.lower(value),
+        FfiConverterOptionUInt64.lower(cachedServerTs),$0
     )
 }
 }
@@ -949,6 +1310,7 @@ fileprivate struct UniffiCallbackInterfaceQuerySubscriber {
         onUpdate: { (
             uniffiHandle: UInt64,
             value: RustBuffer,
+            cachedServerTs: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -958,7 +1320,8 @@ fileprivate struct UniffiCallbackInterfaceQuerySubscriber {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.onUpdate(
-                     value: try FfiConverterString.lift(value)
+                     value: try FfiConverterString.lift(value),
+                     cachedServerTs: try FfiConverterOptionUInt64.lift(cachedServerTs)
                 )
             }
 
@@ -1281,6 +1644,144 @@ public func FfiConverterTypeWebSocketStateSubscriber_lower(_ value: WebSocketSta
 }
 
 
+public struct MobileOptimisticQuery {
+    public var args: [String: String]
+    public var value: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(args: [String: String], value: String?) {
+        self.args = args
+        self.value = value
+    }
+}
+
+
+
+extension MobileOptimisticQuery: Equatable, Hashable {
+    public static func ==(lhs: MobileOptimisticQuery, rhs: MobileOptimisticQuery) -> Bool {
+        if lhs.args != rhs.args {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(args)
+        hasher.combine(value)
+    }
+}
+
+
+public struct FfiConverterTypeMobileOptimisticQuery: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileOptimisticQuery {
+        return
+            try MobileOptimisticQuery(
+                args: FfiConverterDictionaryStringString.read(from: &buf), 
+                value: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileOptimisticQuery, into buf: inout [UInt8]) {
+        FfiConverterDictionaryStringString.write(value.args, into: &buf)
+        FfiConverterOptionString.write(value.value, into: &buf)
+    }
+}
+
+
+public func FfiConverterTypeMobileOptimisticQuery_lift(_ buf: RustBuffer) throws -> MobileOptimisticQuery {
+    return try FfiConverterTypeMobileOptimisticQuery.lift(buf)
+}
+
+public func FfiConverterTypeMobileOptimisticQuery_lower(_ value: MobileOptimisticQuery) -> RustBuffer {
+    return FfiConverterTypeMobileOptimisticQuery.lower(value)
+}
+
+
+public struct QueryCacheConfig {
+    public var directory: String
+    public var capacity: UInt32?
+    public var maxAgeMs: UInt64?
+    public var sharedQueries: [String]
+    public var keepResultsOnError: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(directory: String, capacity: UInt32? = nil, maxAgeMs: UInt64? = nil, sharedQueries: [String] = [], keepResultsOnError: Bool = false) {
+        self.directory = directory
+        self.capacity = capacity
+        self.maxAgeMs = maxAgeMs
+        self.sharedQueries = sharedQueries
+        self.keepResultsOnError = keepResultsOnError
+    }
+}
+
+
+
+extension QueryCacheConfig: Equatable, Hashable {
+    public static func ==(lhs: QueryCacheConfig, rhs: QueryCacheConfig) -> Bool {
+        if lhs.directory != rhs.directory {
+            return false
+        }
+        if lhs.capacity != rhs.capacity {
+            return false
+        }
+        if lhs.maxAgeMs != rhs.maxAgeMs {
+            return false
+        }
+        if lhs.sharedQueries != rhs.sharedQueries {
+            return false
+        }
+        if lhs.keepResultsOnError != rhs.keepResultsOnError {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(directory)
+        hasher.combine(capacity)
+        hasher.combine(maxAgeMs)
+        hasher.combine(sharedQueries)
+        hasher.combine(keepResultsOnError)
+    }
+}
+
+
+public struct FfiConverterTypeQueryCacheConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> QueryCacheConfig {
+        return
+            try QueryCacheConfig(
+                directory: FfiConverterString.read(from: &buf), 
+                capacity: FfiConverterOptionUInt32.read(from: &buf), 
+                maxAgeMs: FfiConverterOptionUInt64.read(from: &buf), 
+                sharedQueries: FfiConverterSequenceString.read(from: &buf), 
+                keepResultsOnError: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: QueryCacheConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.directory, into: &buf)
+        FfiConverterOptionUInt32.write(value.capacity, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxAgeMs, into: &buf)
+        FfiConverterSequenceString.write(value.sharedQueries, into: &buf)
+        FfiConverterBool.write(value.keepResultsOnError, into: &buf)
+    }
+}
+
+
+public func FfiConverterTypeQueryCacheConfig_lift(_ buf: RustBuffer) throws -> QueryCacheConfig {
+    return try FfiConverterTypeQueryCacheConfig.lift(buf)
+}
+
+public func FfiConverterTypeQueryCacheConfig_lower(_ value: QueryCacheConfig) -> RustBuffer {
+    return FfiConverterTypeQueryCacheConfig.lower(value)
+}
+
+
 public enum ClientError {
 
     
@@ -1407,6 +1908,48 @@ extension WebSocketState: Equatable, Hashable {}
 
 
 
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1467,6 +2010,71 @@ fileprivate struct FfiConverterOptionTypeWebSocketStateSubscriber: FfiConverterR
         case 1: return try FfiConverterTypeWebSocketStateSubscriber.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+fileprivate struct FfiConverterOptionTypeQueryCacheConfig: FfiConverterRustBuffer {
+    typealias SwiftType = QueryCacheConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeQueryCacheConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeQueryCacheConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+fileprivate struct FfiConverterSequenceTypeMobileOptimisticQuery: FfiConverterRustBuffer {
+    typealias SwiftType = [MobileOptimisticQuery]
+
+    public static func write(_ value: [MobileOptimisticQuery], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMobileOptimisticQuery.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MobileOptimisticQuery] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MobileOptimisticQuery]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMobileOptimisticQuery.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -1634,7 +2242,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_action() != 2118) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_convexmobile_checksum_method_mobileconvexclient_clear_query_cache() != 688) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_convexmobile_checksum_method_mobileconvexclient_flush_query_cache() != 36806) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_mutation() != 29570) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_convexmobile_checksum_method_mobileconvexclient_mutation_with_optimistic_update() != 58580) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_query() != 27750) {
@@ -1649,10 +2266,22 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_mobileconvexclient_subscribe() != 60726) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_get_all_queries() != 6953) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_get_query() != 34649) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_set_query() != 60465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_convexmobile_checksum_method_mobileoptimisticupdate_apply() != 22227) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_convexmobile_checksum_method_querysubscriber_on_error() != 20316) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_convexmobile_checksum_method_querysubscriber_on_update() != 13905) {
+    if (uniffi_convexmobile_checksum_method_querysubscriber_on_update() != 22338) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_convexmobile_checksum_method_subscriptionhandle_cancel() != 26127) {
@@ -1661,11 +2290,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_convexmobile_checksum_method_websocketstatesubscriber_on_state_change() != 60594) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 43734) {
+    if (uniffi_convexmobile_checksum_constructor_mobileconvexclient_new() != 53660) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitAuthTokenProvider()
+    uniffiCallbackInitMobileOptimisticUpdate()
     uniffiCallbackInitQuerySubscriber()
     uniffiCallbackInitWebSocketStateSubscriber()
     return InitializationResult.ok

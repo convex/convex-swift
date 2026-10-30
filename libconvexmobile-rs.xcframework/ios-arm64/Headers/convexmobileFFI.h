@@ -257,6 +257,13 @@ typedef void (*UniffiCallbackInterfaceAuthTokenProviderMethod0)(uint64_t, int8_t
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MOBILE_OPTIMISTIC_UPDATE_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MOBILE_OPTIMISTIC_UPDATE_METHOD0
+typedef void (*UniffiCallbackInterfaceMobileOptimisticUpdateMethod0)(uint64_t, void*_Nonnull, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD0
 typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
@@ -266,7 +273,7 @@ typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod0)(uint64_t, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_QUERY_SUBSCRIBER_METHOD1
-typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceQuerySubscriberMethod1)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -284,6 +291,14 @@ typedef struct UniffiVTableCallbackInterfaceAuthTokenProvider {
     UniffiCallbackInterfaceAuthTokenProviderMethod0 _Nonnull fetchToken;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceAuthTokenProvider;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MOBILE_OPTIMISTIC_UPDATE
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MOBILE_OPTIMISTIC_UPDATE
+typedef struct UniffiVTableCallbackInterfaceMobileOptimisticUpdate {
+    UniffiCallbackInterfaceMobileOptimisticUpdateMethod0 _Nonnull apply;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+} UniffiVTableCallbackInterfaceMobileOptimisticUpdate;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_QUERY_SUBSCRIBER
@@ -335,7 +350,7 @@ void uniffi_convexmobile_fn_free_mobileconvexclient(void*_Nonnull ptr, RustCallS
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CONSTRUCTOR_MOBILECONVEXCLIENT_NEW
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CONSTRUCTOR_MOBILECONVEXCLIENT_NEW
-void*_Nonnull uniffi_convexmobile_fn_constructor_mobileconvexclient_new(RustBuffer deployment_url, RustBuffer client_id, RustBuffer web_socket_state_subscriber, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_convexmobile_fn_constructor_mobileconvexclient_new(RustBuffer deployment_url, RustBuffer client_id, RustBuffer web_socket_state_subscriber, RustBuffer query_cache, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_ACTION
@@ -343,9 +358,24 @@ void*_Nonnull uniffi_convexmobile_fn_constructor_mobileconvexclient_new(RustBuff
 uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_action(void*_Nonnull ptr, RustBuffer name, RustBuffer args
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
+uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_clear_query_cache(void*_Nonnull ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_flush_query_cache(void*_Nonnull ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_MUTATION
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_MUTATION
 uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_mutation(void*_Nonnull ptr, RustBuffer name, RustBuffer args
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_MUTATION_WITH_OPTIMISTIC_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_MUTATION_WITH_OPTIMISTIC_UPDATE
+uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_mutation_with_optimistic_update(void*_Nonnull ptr, RustBuffer name, RustBuffer args, void*_Nonnull optimistic_update
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_QUERY
@@ -366,6 +396,51 @@ uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_set_auth_callback(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_SUBSCRIBE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILECONVEXCLIENT_SUBSCRIBE
 uint64_t uniffi_convexmobile_fn_method_mobileconvexclient_subscribe(void*_Nonnull ptr, RustBuffer name, RustBuffer args, void*_Nonnull subscriber
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_MOBILEOPTIMISTICLOCALSTORE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_MOBILEOPTIMISTICLOCALSTORE
+void*_Nonnull uniffi_convexmobile_fn_clone_mobileoptimisticlocalstore(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_FREE_MOBILEOPTIMISTICLOCALSTORE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_FREE_MOBILEOPTIMISTICLOCALSTORE
+void uniffi_convexmobile_fn_free_mobileoptimisticlocalstore(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_ALL_QUERIES
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_ALL_QUERIES
+RustBuffer uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_get_all_queries(void*_Nonnull ptr, RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_QUERY
+RustBuffer uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_get_query(void*_Nonnull ptr, RustBuffer name, RustBuffer args, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_SET_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICLOCALSTORE_SET_QUERY
+void uniffi_convexmobile_fn_method_mobileoptimisticlocalstore_set_query(void*_Nonnull ptr, RustBuffer name, RustBuffer args, RustBuffer value, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_MOBILEOPTIMISTICUPDATE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_MOBILEOPTIMISTICUPDATE
+void*_Nonnull uniffi_convexmobile_fn_clone_mobileoptimisticupdate(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_FREE_MOBILEOPTIMISTICUPDATE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_FREE_MOBILEOPTIMISTICUPDATE
+void uniffi_convexmobile_fn_free_mobileoptimisticupdate(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_INIT_CALLBACK_VTABLE_MOBILEOPTIMISTICUPDATE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_INIT_CALLBACK_VTABLE_MOBILEOPTIMISTICUPDATE
+void uniffi_convexmobile_fn_init_callback_vtable_mobileoptimisticupdate(UniffiVTableCallbackInterfaceMobileOptimisticUpdate* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICUPDATE_APPLY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_MOBILEOPTIMISTICUPDATE_APPLY
+void uniffi_convexmobile_fn_method_mobileoptimisticupdate_apply(void*_Nonnull ptr, void*_Nonnull store, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_QUERYSUBSCRIBER
@@ -390,7 +465,7 @@ void uniffi_convexmobile_fn_method_querysubscriber_on_error(void*_Nonnull ptr, R
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_QUERYSUBSCRIBER_ON_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_METHOD_QUERYSUBSCRIBER_ON_UPDATE
-void uniffi_convexmobile_fn_method_querysubscriber_on_update(void*_Nonnull ptr, RustBuffer value, RustCallStatus *_Nonnull out_status
+void uniffi_convexmobile_fn_method_querysubscriber_on_update(void*_Nonnull ptr, RustBuffer value, RustBuffer cached_server_ts, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_FN_CLONE_SUBSCRIPTIONHANDLE
@@ -732,9 +807,27 @@ uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_action(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_CLEAR_QUERY_CACHE
+uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_clear_query_cache(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_FLUSH_QUERY_CACHE
+uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_flush_query_cache(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_MUTATION
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_MUTATION
 uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_mutation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_MUTATION_WITH_OPTIMISTIC_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_MUTATION_WITH_OPTIMISTIC_UPDATE
+uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_mutation_with_optimistic_update(void
     
 );
 #endif
@@ -759,6 +852,30 @@ uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_set_auth_callbac
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_SUBSCRIBE
 #define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILECONVEXCLIENT_SUBSCRIBE
 uint16_t uniffi_convexmobile_checksum_method_mobileconvexclient_subscribe(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_ALL_QUERIES
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_ALL_QUERIES
+uint16_t uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_get_all_queries(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_GET_QUERY
+uint16_t uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_get_query(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_SET_QUERY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICLOCALSTORE_SET_QUERY
+uint16_t uniffi_convexmobile_checksum_method_mobileoptimisticlocalstore_set_query(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICUPDATE_APPLY
+#define UNIFFI_FFIDEF_UNIFFI_CONVEXMOBILE_CHECKSUM_METHOD_MOBILEOPTIMISTICUPDATE_APPLY
+uint16_t uniffi_convexmobile_checksum_method_mobileoptimisticupdate_apply(void
     
 );
 #endif

@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 @testable import ConvexMobile
@@ -30,6 +31,176 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertEqual(result!.id, "the_id")
     XCTAssertEqual(result!.val, 42)
     XCTAssertNil(error)
+  }
+
+  func testSubscribeReceivesValueSentBeforeSubscribing() async throws {
+    let expectation = self.expectation(description: "subscribe")
+    var result: Message?
+    let client = ConvexMobile.ConvexClient(ffiClient: FakeMobileConvexClient())
+
+    // The fake sends this query's value before `subscribe` returns, like a cached result.
+    let cancellationHandle = client.subscribe(to: "immediate").sink(
+      receiveCompletion: { _ in },
+      receiveValue: { (value: Message) in
+        result = value
+        expectation.fulfill()
+      })
+
+    await fulfillment(of: [expectation], timeout: 10)
+    cancellationHandle.cancel()
+    XCTAssertEqual(result?.val, 42)
+  }
+
+  func testSubscribeWithCacheInfoSaysWhichResultsAreCached() async throws {
+    struct Count: Decodable, Equatable { let n: Int }
+    let expectation = self.expectation(description: "subscribe")
+    expectation.expectedFulfillmentCount = 2
+    var updates: [QueryUpdate<Count>] = []
+    let client = ConvexMobile.ConvexClient(ffiClient: FakeMobileConvexClient())
+
+    let cancellationHandle = client.subscribeWithCacheInfo(to: "cachedThenFresh", yielding: Count.self)
+      .sink(
+        receiveCompletion: { _ in },
+        receiveValue: { update in
+          updates.append(update)
+          expectation.fulfill()
+        })
+
+    await fulfillment(of: [expectation], timeout: 10)
+    cancellationHandle.cancel()
+    XCTAssertEqual(
+      updates,
+      [
+        QueryUpdate(value: Count(n: 1), cachedAt: Date(timeIntervalSince1970: 1_767_225_600)),
+        QueryUpdate(value: Count(n: 1), cachedAt: nil),
+      ])
+    XCTAssertTrue(updates[0].isCached)
+    XCTAssertFalse(updates[1].isCached)
+  }
+
+  func testQueryCacheOptionsReachTheFfiClient() {
+    let options = QueryCacheOptions(
+      directory: URL(fileURLWithPath: "/tmp/cache", isDirectory: true), capacity: 50, maxAge: 1.5,
+      sharedQueries: ["products:list", "config:get"], keepResultsOnError: true)
+    let config = options.ffiConfig
+    XCTAssertEqual(config.directory, "/tmp/cache")
+    XCTAssertEqual(config.capacity, 50)
+    XCTAssertEqual(config.maxAgeMs, 1500)
+    XCTAssertEqual(config.sharedQueries, ["config:get", "products:list"])
+    XCTAssertTrue(config.keepResultsOnError)
+
+    let defaults = QueryCacheOptions(directory: URL(fileURLWithPath: "/tmp/cache")).ffiConfig
+    XCTAssertNil(defaults.capacity)
+    XCTAssertNil(defaults.maxAgeMs)
+    XCTAssertEqual(defaults.sharedQueries, [])
+    XCTAssertFalse(defaults.keepResultsOnError)
+  }
+
+  func testFlushQueryCacheCallsFfiClient() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    try await client.flushQueryCache()
+
+    XCTAssertEqual(fakeFfiClient.flushQueryCacheCount, 1)
+  }
+
+  func testClearQueryCacheCallsFfiClient() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    try await client.clearQueryCache()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
+  }
+
+  func testLogoutClearsQueryCache() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
+    _ = await client.login()
+
+    await client.logout()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
+  }
+
+  func testDefaultQueryCacheDirectoryIsPerAppAndDeployment() throws {
+    let applicationSupport = URL(fileURLWithPath: "/AppSupport", isDirectory: true)
+    func directory(_ deploymentUrl: String, app: String = "com.example.App") -> URL {
+      ConvexClient.defaultQueryCacheDirectory(
+        for: deploymentUrl, in: applicationSupport, appIdentifier: app)
+    }
+
+    XCTAssertEqual(
+      directory("https://a-1.convex.cloud").path,
+      "/AppSupport/com.example.App/ConvexQueryCache/https___a_1_convex_cloud")
+    XCTAssertNotEqual(directory("https://a-1.convex.cloud"), directory("https://b-2.convex.cloud"))
+    XCTAssertNotEqual(
+      directory("https://a-1.convex.cloud", app: "com.example.Other"),
+      directory("https://a-1.convex.cloud"))
+    XCTAssertEqual(
+      directory("https://a-1.convex.cloud", app: "my/tool").pathComponents.dropLast(2).last,
+      "my_tool")
+  }
+
+  func testPrepareQueryCacheDirectoryExcludesExistingDirectoryFromBackup() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("convex-query-cache-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("cache", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    try ConvexClient.prepareQueryCacheDirectory(at: directory)
+    try ConvexClient.prepareQueryCacheDirectory(at: directory)
+
+    let values = try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
+    XCTAssertEqual(values.isExcludedFromBackup, true)
+  }
+
+  func testInvalidSessionClearsQueryCache() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let fakeAuthProvider = FakeAuthProvider()
+    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: fakeAuthProvider)
+    _ = await client.login()
+
+    fakeAuthProvider.simulateTokenRefresh(newToken: nil)
+    // Auth changes are applied in call order, so the invalidation has been applied once this
+    // returns. Cached logins never clear the cache.
+    _ = await client.loginFromCache()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
+  }
+
+  func testLoginWhileSignedInClearsQueryCache() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
+    _ = await client.login()
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 0)
+
+    // A user switching accounts without logging out.
+    _ = await client.login()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
+  }
+
+  func testLoginFromCacheWhileSignedInKeepsQueryCache() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
+    _ = await client.login()
+
+    _ = await client.loginFromCache()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 0)
+  }
+
+  func testLogoutClearsQueryCacheEvenIfLogoutFails() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexClientWithAuth(
+      ffiClient: fakeFfiClient, authProvider: FailingLogoutAuthProvider())
+
+    await client.logout()
+
+    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
   }
 
   func testSubscribeCanTrimDupeVals() async throws {
@@ -235,6 +406,45 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertNil(error)
   }
 
+  func testSubscribeFinishesForLaterSubscribersAfterCancellation() async throws {
+    let received = self.expectation(description: "first subscriber received a value")
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+    let publisher: AnyPublisher<Message, ClientError> = client.subscribe(to: "foo")
+
+    let first = publisher.sink(receiveCompletion: { _ in }, receiveValue: { _ in received.fulfill() })
+    await fulfillment(of: [received], timeout: 10)
+    first.cancel()
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+
+    // The Convex subscription is gone, so a later subscriber must not get its last value.
+    let finished = self.expectation(description: "later subscriber finished")
+    let later = publisher.sink(
+      receiveCompletion: { completion in
+        if case .finished = completion { finished.fulfill() }
+      },
+      receiveValue: { _ in XCTFail("A canceled subscription should not publish values") })
+    await fulfillment(of: [finished], timeout: 10)
+    later.cancel()
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+  }
+
+  func testSubscribeCancellationBeforeSubscriptionStartsCancelsIt() async throws {
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+
+    // The fake takes a while to start this subscription, so this cancels before its handle arrives.
+    client.subscribe(to: "slowStart", yielding: Message.self)
+      .sink(receiveCompletion: { _ in }, receiveValue: { _ in })
+      .cancel()
+
+    let deadline = Date().addingTimeInterval(5)
+    while ffiClient.cancellationCount == 0 && Date() < deadline {
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+  }
+
   func testMutationRoundTrip() async throws {
     let fakeFfiClient = FakeMobileConvexClient()
     let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
@@ -252,6 +462,187 @@ final class ConvexMobileTests: XCTestCase {
     try await client.mutation("nullResult")
 
     XCTAssertEqual(fakeFfiClient.mutationCalls, ["nullResult"])
+  }
+
+  func testOptimisticUpdateSetsQueryAndRunsMutation() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("notes:list", ["channel": "\"a\""])] =
+      "[{\"body\":\"first\",\"likes\":{\"$integer\":\"AQAAAAAAAAA=\"}}]"
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    let message: Message = try await client.mutation(
+      "foo", with: ["anInt": 101],
+      optimisticUpdate: { store in
+        let notes: [Note] = try store.getQuery("notes:list", with: ["channel": "a"]) ?? []
+        try store.setQuery(
+          "notes:list", with: ["channel": "a"], to: notes + [Note(body: "second", likes: 0)])
+      })
+
+    XCTAssertEqual(message.val, 101)
+    XCTAssertEqual(fakeFfiClient.mutationCalls, ["foo"])
+    let notes = try JSONDecoder().decode(
+      [Note].self,
+      from: Data(
+        fakeFfiClient.optimisticStore.values[
+          FakeOptimisticLocalStore.key("notes:list", ["channel": "\"a\""])]!!.utf8))
+    XCTAssertEqual(notes, [Note(body: "first", likes: 1), Note(body: "second", likes: 0)])
+  }
+
+  func testOptimisticUpdateGetAllQueriesArgsRoundTrip() async throws {
+    let fakeFfiClient = FakeMobileConvexClient()
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("counter:get", ["name": "\"a\""])] = "1"
+    fakeFfiClient.optimisticStore.values[
+      FakeOptimisticLocalStore.key("counter:get", ["name": "\"b\""])] = "2"
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    // Optimistic updates are `@Sendable`, so collect names through a lock.
+    let names = Locked<[String]>([])
+    try await client.mutation(
+      "nullResult",
+      optimisticUpdate: { store in
+        for query in try store.getAllQueries("counter:get", yielding: Double.self) {
+          let name = try query.decodeArgs(as: CounterArgs.self).name
+          names.withLock { $0.append(name) }
+          try store.setQuery("counter:get", with: query.args, to: query.value! + 10)
+        }
+        try store.setQueryLoading("other:query")
+      })
+
+    XCTAssertEqual(names.withLock { $0 }.sorted(), ["a", "b"])
+    let values = fakeFfiClient.optimisticStore.values
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("counter:get", ["name": "\"a\""])], "11")
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("counter:get", ["name": "\"b\""])], "12")
+    XCTAssertEqual(values[FakeOptimisticLocalStore.key("other:query", [:])], .some(nil))
+  }
+
+  /// Sets `serverValue` as the result of `name` in a fake store, applies `update` to it and returns
+  /// the value the update set.
+  private func applyOptimisticUpdate(
+    to name: String, withServerValue serverValue: String,
+    _ update: @escaping OptimisticUpdate
+  ) async throws -> String {
+    let fakeFfiClient = FakeMobileConvexClient()
+    let key = FakeOptimisticLocalStore.key(name, [:])
+    fakeFfiClient.optimisticStore.values[key] = serverValue
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+    try await client.mutation("nullResult", optimisticUpdate: update)
+    return try XCTUnwrap(fakeFfiClient.optimisticStore.values[key] ?? nil)
+  }
+
+  func testOptimisticTopLevelIntRoundTripsAsJsNumber() async throws {
+    // The server sends a JavaScript number (a Float64) as a JSON number.
+    let set = try await applyOptimisticUpdate(to: "counter:get", withServerValue: "5.0") { store in
+      let count: Int = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: count + 1)
+    }
+
+    XCTAssertEqual(set, "6")
+    XCTAssertEqual(try JSONDecoder().decode(Int.self, from: Data(set.utf8)), 6)
+  }
+
+  func testOptimisticNestedIntRoundTripsAsJsNumber() async throws {
+    let set = try await applyOptimisticUpdate(
+      to: "counter:get", withServerValue: "{\"count\":5.0}"
+    ) { store in
+      let counter: Counter = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: Counter(count: counter.count + 1))
+    }
+
+    XCTAssertEqual(set, "{\"count\":6}")
+    XCTAssertEqual(try JSONDecoder().decode(Counter.self, from: Data(set.utf8)), Counter(count: 6))
+  }
+
+  func testOptimisticDoubleRoundTripsAsJsNumber() async throws {
+    let set = try await applyOptimisticUpdate(to: "counter:get", withServerValue: "1.5") { store in
+      let value: Double = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: value + 1)
+    }
+
+    XCTAssertEqual(set, "2.5")
+    XCTAssertEqual(try JSONDecoder().decode(Double.self, from: Data(set.utf8)), 2.5)
+  }
+
+  func testOptimisticConvexIntRoundTripsAsInt64() async throws {
+    // The server sends an Int64 (a JavaScript bigint) as an `$integer` object.
+    let set = try await applyOptimisticUpdate(
+      to: "notes:get", withServerValue: "{\"body\":\"a\",\"likes\":{\"$integer\":\"BQAAAAAAAAA=\"}}"
+    ) { store in
+      let note: Note = try store.getQuery("notes:get")!
+      try store.setQuery("notes:get", to: Note(body: note.body, likes: note.likes + 1))
+    }
+
+    let json = try JSONSerialization.jsonObject(with: Data(set.utf8)) as! [String: Any]
+    XCTAssertEqual(json["likes"] as? [String: String], ["$integer": "BgAAAAAAAAA="])
+    XCTAssertEqual(
+      try JSONDecoder().decode(Note.self, from: Data(set.utf8)), Note(body: "a", likes: 6))
+  }
+
+  func testOptimisticTopLevelConvexIntRoundTripsAsInt64() async throws {
+    let set = try await applyOptimisticUpdate(
+      to: "counter:get", withServerValue: "{\"$integer\":\"BQAAAAAAAAA=\"}"
+    ) { store in
+      let count: ConvexInt<Int> = try store.getQuery("counter:get")!
+      try store.setQuery("counter:get", to: ConvexInt(wrappedValue: count.wrappedValue + 1))
+    }
+
+    XCTAssertEqual(set, "{\"$integer\":\"BgAAAAAAAAA=\"}")
+  }
+
+  func testThrowingOptimisticUpdateFailsMutationWithItsError() async throws {
+    struct BadUpdate: Error {}
+    let fakeFfiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
+
+    do {
+      try await client.mutation(
+        "nullResult",
+        optimisticUpdate: { store in
+          try store.setQuery("counter:get", to: 1)
+          throw BadUpdate()
+        })
+      XCTFail("mutation should have thrown")
+    } catch is BadUpdate {}
+
+    XCTAssertEqual(fakeFfiClient.mutationCalls, [])
+    XCTAssertEqual(fakeFfiClient.optimisticUpdateApplyCount, 1)
+  }
+
+  func testOptimisticUpdateErrorsCrossTheFfiAsClientErrors() throws {
+    struct BadUpdate: Error {}
+    let adapter = OptimisticUpdateAdapter(update: { _ in throw BadUpdate() })
+
+    XCTAssertThrowsError(try adapter.apply(store: FakeOptimisticLocalStore())) { error in
+      guard case ClientError.InternalError = error else {
+        return XCTFail("expected an InternalError, got \(error)")
+      }
+    }
+  }
+
+  func testConvexNumberWrappersEncodeToConvexJson() throws {
+    let encoded = try JSONEncoder().encode(
+      NumberWrappers(int: 42, optionalInt: nil, float: .infinity, optionalFloat: 1.5))
+    let json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+
+    XCTAssertEqual(json["int"] as? [String: String], ["$integer": "KgAAAAAAAAA="])
+    XCTAssertNil(json["optionalInt"])
+    XCTAssertEqual(json["float"] as? [String: String], ["$float": "AAAAAAAA8H8="])
+    XCTAssertEqual(json["optionalFloat"] as? Double, 1.5)
+    XCTAssertEqual(
+      try JSONDecoder().decode(NumberWrappers.self, from: encoded),
+      NumberWrappers(int: 42, optionalInt: nil, float: .infinity, optionalFloat: 1.5))
+  }
+
+  func testConvexIntEncodesUnsignedValuesAboveInt64MaxByBitPattern() throws {
+    let encoded = try JSONEncoder().encode(ConvexInt<UInt64>(wrappedValue: UInt64.max))
+
+    let json = try JSONSerialization.jsonObject(with: encoded) as! [String: String]
+
+    // -1 as an Int64.
+    XCTAssertEqual(json, ["$integer": "//////////8="])
+    XCTAssertEqual(
+      try JSONDecoder().decode(ConvexInt<UInt64>.self, from: encoded).wrappedValue, UInt64.max)
   }
 
   func testActionRoundTrip() async throws {
@@ -600,6 +991,32 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     return "{\"_id\": \"the_id\", \"val\": \(receivedConvexInt), \"extra\": null}"
   }
 
+  private let clearQueryCacheLock = NSLock()
+  private var _clearQueryCacheCount = 0
+  var clearQueryCacheCount: Int { clearQueryCacheLock.withLock { _clearQueryCacheCount } }
+
+  func clearQueryCache() async throws {
+    clearQueryCacheLock.withLock { _clearQueryCacheCount += 1 }
+  }
+
+  var flushQueryCacheCount = 0
+
+  func flushQueryCache() async throws {
+    flushQueryCacheCount += 1
+  }
+
+  let optimisticStore = FakeOptimisticLocalStore()
+  var optimisticUpdateApplyCount = 0
+
+  func mutationWithOptimisticUpdate(
+    name: String, args: [String: String], optimisticUpdate: any MobileOptimisticUpdate
+  ) async throws -> String {
+    optimisticUpdateApplyCount += 1
+    // Like the Rust client, don't send the mutation if the update fails when it's called.
+    try optimisticUpdate.apply(store: optimisticStore)
+    return try await mutation(name: name, args: args)
+  }
+
   func query(name: String, args: [String: String]) async throws -> String {
     return "foo"
   }
@@ -621,24 +1038,43 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     async throws -> UniFFI.SubscriptionHandle
   {
     subscriptionArgs = args
+    if name == "slowStart" {
+      try await Task.sleep(nanoseconds: UInt64(0.1 * 1_000_000_000))
+    }
+    if name == "cachedThenFresh" {
+      // A result restored from the cache (sent by the server at 2026-01-01T00:00:00Z), then the
+      // server's, with the same value.
+      subscriber.onUpdate(value: "{\"n\": 1}", cachedServerTs: 1_767_225_600_000_000_000)
+      let _ = Task {
+        try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
+        subscriber.onUpdate(value: "{\"n\": 1}", cachedServerTs: nil)
+      }
+      return FakeSubscriptionHandle(client: self)
+    }
+    if name == "immediate" {
+      subscriber.onUpdate(
+        value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}", cachedServerTs: nil)
+      return FakeSubscriptionHandle(client: self)
+    }
     let _ = Task {
       try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
       if name == "typeMismatch" {
         subscriber.onUpdate(
-          value: "\"just a plain string\"")
+          value: "\"just a plain string\"", cachedServerTs: nil)
       } else if name == "missingVal" {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"extra\": null}", cachedServerTs: nil)
       } else if name == "nullVal" {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"val\": null, \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"val\": null, \"extra\": null}", cachedServerTs: nil)
       } else {
         subscriber.onUpdate(
-          value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+          value: "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}", cachedServerTs: nil)
         if name == "dupeVals" {
           subscriber.onUpdate(
             value:
-              "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}")
+              "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}",
+            cachedServerTs: nil)
         }
       }
       resultPublished?.fulfill()
@@ -687,6 +1123,14 @@ class FakeAuthProvider: AuthProvider {
   }
 }
 
+class FailingLogoutAuthProvider: FakeAuthProvider {
+  struct LogoutFailed: Error {}
+
+  override func logout() async throws {
+    throw LogoutFailed()
+  }
+}
+
 class FakeSubscriptionHandle: UniFFI.SubscriptionHandle {
   let client: FakeMobileConvexClient
   init(client: FakeMobileConvexClient) {
@@ -701,6 +1145,85 @@ class FakeSubscriptionHandle: UniFFI.SubscriptionHandle {
   override func cancel() {
     self.client.cancellationCount += 1
   }
+}
+
+/// An in-memory stand-in for the Rust optimistic update store, keyed by query name and JSON args.
+class FakeOptimisticLocalStore: UniFFI.MobileOptimisticLocalStore {
+  /// A `nil` value means the query was set to loading.
+  var values: [String: String?] = [:]
+
+  init() {
+    super.init(noPointer: UniFFI.MobileOptimisticLocalStore.NoPointer())
+  }
+
+  required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+    fatalError("init(unsafeFromRawPointer:) has not been implemented")
+  }
+
+  static func key(_ name: String, _ args: [String: String]) -> String {
+    let sortedArgs = args.keys.sorted().map { "\($0)=\(args[$0]!)" }.joined(separator: ",")
+    return "\(name)(\(sortedArgs))"
+  }
+
+  override func getQuery(name: String, args: [String: String]) throws -> String? {
+    values[Self.key(name, args)] ?? nil
+  }
+
+  override func getAllQueries(name: String) throws -> [MobileOptimisticQuery] {
+    values.compactMap { key, value in
+      guard key.hasPrefix("\(name)(") else { return nil }
+      let argsString = key.dropFirst(name.count + 1).dropLast()
+      var args: [String: String] = [:]
+      for pair in argsString.split(separator: ",") {
+        let parts = pair.split(separator: "=", maxSplits: 1)
+        args[String(parts[0])] = String(parts[1])
+      }
+      return MobileOptimisticQuery(args: args, value: value)
+    }
+  }
+
+  override func setQuery(name: String, args: [String: String], value: String?) throws {
+    values[Self.key(name, args)] = .some(value)
+  }
+}
+
+private struct Note: Codable, Equatable {
+  let body: String
+  @ConvexInt
+  var likes: Int
+}
+
+/// A value guarded by a lock, for state shared with `@Sendable` closures.
+private final class Locked<Value>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Value
+
+  init(_ value: Value) {
+    self.value = value
+  }
+
+  func withLock<R>(_ body: (inout Value) throws -> R) rethrows -> R {
+    try lock.withLock { try body(&value) }
+  }
+}
+
+private struct Counter: Codable, Equatable {
+  let count: Int
+}
+
+private struct CounterArgs: Decodable {
+  let name: String
+}
+
+private struct NumberWrappers: Codable, Equatable {
+  @ConvexInt
+  var int: Int
+  @OptionalConvexInt
+  var optionalInt: Int?
+  @ConvexFloat
+  var float: Double
+  @OptionalConvexFloat
+  var optionalFloat: Double?
 }
 
 private struct MessageWithOptionalVal: Decodable {
