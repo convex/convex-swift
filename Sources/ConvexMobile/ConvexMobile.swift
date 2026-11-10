@@ -44,42 +44,7 @@ public class ConvexClient {
   public func subscribe<T: Decodable>(
     to name: String, with args: [String: ConvexEncodable?]? = nil, yielding output: T.Type? = nil
   ) -> AnyPublisher<T, ClientError> {
-    // There are two steps to producing the final Publisher in this method.
-    // 1. Subscribe to the data from Convex and publish the subscription handle
-    // 2. Feed the subscription handle into the Convex data Publisher so it can cancel the upstream
-    //    subscription when downstream subscribers are done consuming data
-
-    // This Publisher will ultimately publish the data received from Convex.
-    let convexPublisher = PassthroughSubject<T, ClientError>()
-    let adapter = SubscriptionAdapter<T>(publisher: convexPublisher)
-
-    // This Publisher is responsible for initializing the Convex subscription and returning a handle
-    // to the upstream (Convex) subscription.
-    let initializationPublisher = Future<SubscriptionHandle, ClientError> {
-      result in
-      Task {
-        do {
-          let subscriptionHandle = try await self.ffiClient.subscribe(
-            name: name,
-            args: args?.mapValues({ v in
-              try v?.convexEncode() ?? "null"
-            }) ?? [:], subscriber: adapter)
-          result(.success(subscriptionHandle))
-        } catch {
-          result(.failure(ClientError.InternalError(msg: error.localizedDescription)))
-        }
-      }
-    }
-
-    // The final Publisher takes the handle from the initial Convex subscription and supplies it to
-    // the data publisher so it can cancel the upstream subscription when consumers are no longer
-    // listening for data.
-    return initializationPublisher.flatMap({ subscriptionHandle in
-      convexPublisher.handleEvents(receiveCancel: {
-        subscriptionHandle.cancel()
-      })
-    })
-    .eraseToAnyPublisher()
+    QueryPublisher(ffiClient: ffiClient, name: name, args: args).eraseToAnyPublisher()
   }
 
   /// Executes the mutation with the given `name` and `args` and returns the result.
@@ -460,13 +425,146 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   private typealias LoginStrategy = (@Sendable @escaping (String?) -> Void) async throws -> T
 }
 
-private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
-  typealias Publisher = PassthroughSubject<T, ClientError>
+/// Publishes one query subscription on the Rust client.
+///
+/// Each downstream subscriber gets its own ``QuerySubscription``, which starts the Rust subscription on
+/// the first demand and owns its handle.
+private struct QueryPublisher<T: Decodable>: Publisher {
+  typealias Output = T
+  typealias Failure = ClientError
 
-  let publisher: Publisher
+  let ffiClient: UniFFI.MobileConvexClientProtocol
+  let name: String
+  let args: [String: ConvexEncodable?]?
 
-  init(publisher: Publisher) {
-    self.publisher = publisher
+  func receive<S: Subscriber>(subscriber: S) where S.Input == T, S.Failure == ClientError {
+    subscriber.receive(
+      subscription: QuerySubscription(
+        ffiClient: ffiClient, name: name, args: args, downstream: subscriber))
+  }
+}
+
+/// One downstream's query subscription: it delivers the Rust client's values and errors, and cancels
+/// the Rust subscription when the downstream cancels.
+///
+/// The Rust client delivers on its own threads, `subscribe` returns the handle on another, and the
+/// downstream may cancel from a third, so one lock guards all state, and nothing outside the lock is
+/// called while holding it.
+/// - A cancel that comes before the handle cancels the handle once it arrives.
+/// - A value the Rust client sends before `subscribe` returns reaches the downstream, which is already
+///   subscribed when the Rust subscription starts.
+/// - Deliveries to the downstream are serialized, and never happen after a cancel or completion has
+///   been observed.
+private final class QuerySubscription<T: Decodable, S: Subscriber>: Subscription, @unchecked Sendable
+where S.Input == T, S.Failure == ClientError {
+  private let ffiClient: UniFFI.MobileConvexClientProtocol
+  private let name: String
+  private let args: [String: ConvexEncodable?]?
+
+  private let lock = NSLock()
+  /// Serializes calls into the downstream. Recursive, since a downstream may synchronously cause the
+  /// next delivery.
+  private let deliveryLock = NSRecursiveLock()
+  /// Nil once cancelled or completed.
+  private var downstream: S?
+  private var demand = Subscribers.Demand.none
+  private var started = false
+  private var handle: SubscriptionHandle?
+
+  init(
+    ffiClient: UniFFI.MobileConvexClientProtocol, name: String, args: [String: ConvexEncodable?]?,
+    downstream: S
+  ) {
+    self.ffiClient = ffiClient
+    self.name = name
+    self.args = args
+    self.downstream = downstream
+  }
+
+  func request(_ demand: Subscribers.Demand) {
+    lock.lock()
+    guard downstream != nil else {
+      lock.unlock()
+      return
+    }
+    self.demand += demand
+    let start = !started
+    started = true
+    lock.unlock()
+    if start { self.start() }
+  }
+
+  func cancel() {
+    lock.lock()
+    downstream = nil
+    let handle = self.handle
+    self.handle = nil
+    lock.unlock()
+    handle?.cancel()
+  }
+
+  private func start() {
+    // Holds the Rust client's callbacks without retaining this subscription, so the handle (which keeps
+    // the callbacks alive) and this subscription don't keep each other alive.
+    let subscriber = QuerySubscriberAdapter(self)
+    Task {
+      do {
+        let handle = try await ffiClient.subscribe(
+          name: name,
+          args: args?.mapValues({ v in
+            try v?.convexEncode() ?? "null"
+          }) ?? [:], subscriber: subscriber)
+        adopt(handle)
+      } catch {
+        finish(.failure(ClientError.InternalError(msg: error.localizedDescription)))
+      }
+    }
+  }
+
+  /// Keeps the handle, or cancels it at once if the downstream already cancelled.
+  private func adopt(_ handle: SubscriptionHandle) {
+    lock.lock()
+    let cancelled = downstream == nil
+    if !cancelled { self.handle = handle }
+    lock.unlock()
+    if cancelled { handle.cancel() }
+  }
+
+  fileprivate func receive(_ value: T) {
+    deliveryLock.lock()
+    defer { deliveryLock.unlock() }
+    lock.lock()
+    // Without demand the value is dropped, as a `PassthroughSubject` would.
+    guard let downstream, demand > 0 else {
+      lock.unlock()
+      return
+    }
+    demand -= 1
+    lock.unlock()
+    let more = downstream.receive(value)
+    lock.lock()
+    if self.downstream != nil { demand += more }
+    lock.unlock()
+  }
+
+  fileprivate func finish(_ completion: Subscribers.Completion<ClientError>) {
+    deliveryLock.lock()
+    defer { deliveryLock.unlock() }
+    lock.lock()
+    let downstream = self.downstream
+    self.downstream = nil
+    lock.unlock()
+    // The handle stays until this subscription is released, as it did before.
+    downstream?.receive(completion: completion)
+  }
+}
+
+private final class QuerySubscriberAdapter<T: Decodable, S: Subscriber>: QuerySubscriber
+where S.Input == T, S.Failure == ClientError {
+  private weak var subscription: QuerySubscription<T, S>?
+
+  init(_ subscription: QuerySubscription<T, S>) {
+    self.subscription = subscription
   }
 
   func onError(message: String, value: String?) {
@@ -476,16 +574,15 @@ private class SubscriptionAdapter<T: Decodable>: QuerySubscriber {
     } else {
       err = ClientError.ServerError(msg: message)
     }
-    publisher.send(
-      completion: Subscribers.Completion.failure(err))
+    subscription?.finish(.failure(err))
   }
 
   func onUpdate(value: String) {
+    guard let subscription else { return }
     do {
-      publisher.send(try JSONDecoder().decode(Publisher.Output.self, from: Data(value.utf8)))
+      subscription.receive(try JSONDecoder().decode(T.self, from: Data(value.utf8)))
     } catch {
-      publisher.send(
-        completion: .failure(ClientError.InternalError(msg: error.localizedDescription)))
+      subscription.finish(.failure(ClientError.InternalError(msg: error.localizedDescription)))
     }
   }
 }

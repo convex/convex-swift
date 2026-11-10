@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 @testable import ConvexMobile
@@ -233,6 +234,56 @@ final class ConvexMobileTests: XCTestCase {
 
     XCTAssertEqual(ffiClient.cancellationCount, 1)
     XCTAssertNil(error)
+  }
+
+  func testCancelBeforeSubscribeReturnsCancelsTheHandle() async throws {
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+
+    let cancellationHandle = client.subscribe(to: "slowHandle").sink(
+      receiveCompletion: { _ in }, receiveValue: { (_: Message) in })
+    cancellationHandle.cancel()
+
+    // The handle arrives after the cancel; it must still be cancelled, or the subscription stays open.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    XCTAssertEqual(ffiClient.cancellationCount, 1)
+  }
+
+  func testValueSentBeforeSubscribeReturnsIsDelivered() async throws {
+    let expectation = self.expectation(description: "subscribe")
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+
+    let cancellationHandle = client.subscribe(to: "valueBeforeHandle").sink(
+      receiveCompletion: { _ in }, receiveValue: { (_: Message) in expectation.fulfill() })
+
+    await fulfillment(of: [expectation], timeout: 2)
+    cancellationHandle.cancel()
+  }
+
+  func testCancelRacingDeliveryCancelsEveryHandleOnce() async throws {
+    let ffiClient = FakeMobileConvexClient()
+    let client = ConvexMobile.ConvexClient(ffiClient: ffiClient)
+    let count = 2_000
+
+    // Values keep arriving on other threads while each subscription is cancelled from yet another.
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<count {
+        group.addTask {
+          let box = CancellableSlot()
+          let firstValue = AsyncStream<Void> { continuation in
+            box.set(
+              client.subscribe(to: "stream").sink(
+                receiveCompletion: { _ in }, receiveValue: { (_: Message) in continuation.yield() }))
+          }
+          for await _ in firstValue { break }
+          box.cancel()
+        }
+      }
+    }
+
+    try await Task.sleep(nanoseconds: 300_000_000)
+    XCTAssertEqual(ffiClient.cancellationCount, count)
   }
 
   func testMutationRoundTrip() async throws {
@@ -551,9 +602,24 @@ final class ConvexMobileTests: XCTestCase {
   }
 }
 
+/// Holds a sink's cancellable across threads.
+private final class CancellableSlot: @unchecked Sendable {
+  private let lock = NSLock()
+  private var cancellable: AnyCancellable?
+  func set(_ cancellable: AnyCancellable) { lock.withLock { self.cancellable = cancellable } }
+  func cancel() { lock.withLock { cancellable }?.cancel() }
+}
+
 class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
-  var cancellationCount = 0
-  var subscriptionArgs: [String: String] = [:]
+  private let cancellationLock = NSLock()
+  private var _cancellationCount = 0
+  var cancellationCount: Int { cancellationLock.withLock { _cancellationCount } }
+  func recordCancellation() { cancellationLock.withLock { _cancellationCount += 1 } }
+  private var _subscriptionArgs: [String: String] = [:]
+  var subscriptionArgs: [String: String] {
+    get { cancellationLock.withLock { _subscriptionArgs } }
+    set { cancellationLock.withLock { _subscriptionArgs = newValue } }
+  }
   var mutationCalls: [String] = []
   var actionCalls: [String] = []
   var auth: String? = nil
@@ -621,6 +687,27 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     async throws -> UniFFI.SubscriptionHandle
   {
     subscriptionArgs = args
+    let message = "{\"_id\": \"the_id\", \"val\": {\"$integer\":\"KgAAAAAAAAA=\"}, \"extra\": null}"
+    switch name {
+    case "slowHandle":
+      try await Task.sleep(nanoseconds: 100_000_000)
+      return FakeSubscriptionHandle(client: self)
+    case "valueBeforeHandle":
+      // The Rust client may call the subscriber before `subscribe` returns.
+      subscriber.onUpdate(value: message)
+      return FakeSubscriptionHandle(client: self)
+    case "stream":
+      let handle = FakeSubscriptionHandle(client: self)
+      for _ in 0..<4 {
+        DispatchQueue.global().async { [weak handle] in
+          guard let handle, !handle.isCancelled else { return }
+          subscriber.onUpdate(value: message)
+        }
+      }
+      return handle
+    default:
+      break
+    }
     let _ = Task {
       try await Task.sleep(nanoseconds: UInt64(0.05 * 1_000_000_000))
       if name == "typeMismatch" {
@@ -698,8 +785,13 @@ class FakeSubscriptionHandle: UniFFI.SubscriptionHandle {
     fatalError("init(unsafeFromRawPointer:) has not been implemented")
   }
 
+  private let lock = NSLock()
+  private var cancelled = false
+  var isCancelled: Bool { lock.withLock { cancelled } }
+
   override func cancel() {
-    self.client.cancellationCount += 1
+    lock.withLock { cancelled = true }
+    self.client.recordCancellation()
   }
 }
 
