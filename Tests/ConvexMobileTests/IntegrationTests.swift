@@ -162,9 +162,6 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
       to: "messages:list")
     var offlineResults = offlineMessages.valuesWithTimeout().makeAsyncIterator()
     #expect(try await offlineResults.next() == expected)
-
-    try await offline.clearQueryCache()
-    #expect(try cachedQueryCount(in: cacheDirectory) == 0)
   }
 
   @Test func cached_results_are_shown_offline_when_signed_in_with_an_expired_token() async throws {
@@ -172,9 +169,9 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     defer { try? FileManager.default.removeItem(at: cacheDirectory) }
     let expected = [Message(author: "Cache", body: "Signed in")]
     try await cacheMessages(expected, in: cacheDirectory)
-    // Results are only shown to the user they were fetched for: make these that user's.
+    // The cache holds one user's results: make these that user's.
     try moveCachedResults(
-      in: cacheDirectory, to: offlineDeploymentUrl, scope: OfflineAuthProvider.expiredTokenScope)
+      in: cacheDirectory, to: offlineDeploymentUrl, owner: OfflineAuthProvider.expiredTokenOwner)
 
     // Apps commonly wait until they're signed in to subscribe, so signing in offline must succeed
     // for cached results to show.
@@ -196,16 +193,16 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
   /// A deployment URL that can't be reached, standing in for this test's deployment while offline.
   private let offlineDeploymentUrl = "https://offline.invalid/"
 
-  /// Cached results are only restored for the deployment they came from (and for the user they
-  /// were fetched for), so make the results in `directory` look like they came from
-  /// `deploymentUrl` (for the user with `scope`).
+  /// Cached results are only restored for the deployment they came from, so make the snapshot in
+  /// `directory` look like it came from `deploymentUrl` (and belongs to `owner`).
   private func moveCachedResults(
-    in directory: URL, to deploymentUrl: String, scope: String? = nil
+    in directory: URL, to deploymentUrl: String, owner: String? = nil
   ) throws {
+    let snapshot = "CAST(snapshot AS TEXT)"
     let sql =
-      scope == nil
-      ? "UPDATE query_cache SET query = json_set(query, '$.deploymentUrl', ?1)"
-      : "UPDATE query_cache SET query = json_set(query, '$.deploymentUrl', ?1, '$.scope', ?2)"
+      owner == nil
+      ? "UPDATE query_cache SET snapshot = CAST(json_set(\(snapshot), '$.deploymentUrl', ?1) AS BLOB)"
+      : "UPDATE query_cache SET snapshot = CAST(json_set(\(snapshot), '$.deploymentUrl', ?1, '$.owner', ?2) AS BLOB)"
     try withCacheDatabase(in: directory) { db in
       var statement: OpaquePointer?
       guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -214,7 +211,7 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
       defer { sqlite3_finalize(statement) }
       let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
       sqlite3_bind_text(statement, 1, deploymentUrl, -1, transient)
-      if let scope { sqlite3_bind_text(statement, 2, scope, -1, transient) }
+      if let owner { sqlite3_bind_text(statement, 2, owner, -1, transient) }
       guard sqlite3_step(statement) == SQLITE_DONE else {
         throw CacheDatabaseError(message: String(cString: sqlite3_errmsg(db)))
       }
@@ -248,7 +245,8 @@ private let deploymentUrl = "https://curious-lynx-309.convex.cloud"
     else { return 0 }
     return try withCacheDatabase(in: directory) { db in
       var statement: OpaquePointer?
-      guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM query_cache", -1, &statement, nil) == SQLITE_OK
+      let sql = "SELECT json_array_length(CAST(snapshot AS TEXT), '$.queries') FROM query_cache"
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK
       else { return 0 }  // Not created yet.
       defer { sqlite3_finalize(statement) }
       guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
@@ -470,8 +468,8 @@ private final class OfflineAuthProvider: AuthProvider {
   /// An expired JWT (unsigned: the client only reads its claims, to tell users apart).
   static let expiredToken =
     "eyJhbGciOiJub25lIn0.eyJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZSIsInN1YiI6InVzZXItMSIsImV4cCI6MX0."
-  /// The query cache's scope for results fetched with ``expiredToken``.
-  static let expiredTokenScope = "user:https://auth.example|user-1"
+  /// The query cache owner for results fetched with ``expiredToken``.
+  static let expiredTokenOwner = "user:https://auth.example|user-1"
 
   func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
     do {

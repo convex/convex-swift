@@ -80,48 +80,10 @@ final class ConvexMobileTests: XCTestCase {
 
   func testQueryCacheOptionsReachTheFfiClient() {
     let options = QueryCacheOptions(
-      directory: URL(fileURLWithPath: "/tmp/cache", isDirectory: true), capacity: 50, maxAge: 1.5,
-      sharedQueries: ["products:list", "config:get"], keepResultsOnError: true)
-    let config = options.ffiConfig
-    XCTAssertEqual(config.directory, "/tmp/cache")
-    XCTAssertEqual(config.capacity, 50)
-    XCTAssertEqual(config.maxAgeMs, 1500)
-    XCTAssertEqual(config.sharedQueries, ["config:get", "products:list"])
-    XCTAssertTrue(config.keepResultsOnError)
-
-    let defaults = QueryCacheOptions(directory: URL(fileURLWithPath: "/tmp/cache")).ffiConfig
-    XCTAssertNil(defaults.capacity)
-    XCTAssertNil(defaults.maxAgeMs)
-    XCTAssertEqual(defaults.sharedQueries, [])
-    XCTAssertFalse(defaults.keepResultsOnError)
-  }
-
-  func testFlushQueryCacheCallsFfiClient() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
-
-    try await client.flushQueryCache()
-
-    XCTAssertEqual(fakeFfiClient.flushQueryCacheCount, 1)
-  }
-
-  func testClearQueryCacheCallsFfiClient() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexMobile.ConvexClient(ffiClient: fakeFfiClient)
-
-    try await client.clearQueryCache()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
-  }
-
-  func testLogoutClearsQueryCache() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
-    _ = await client.login()
-
-    await client.logout()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
+      directory: URL(fileURLWithPath: "/tmp/cache", isDirectory: true), maxBytes: 1000)
+    XCTAssertEqual(options.ffiConfig.directory, "/tmp/cache")
+    XCTAssertEqual(options.ffiConfig.maxBytes, 1000)
+    XCTAssertNil(QueryCacheOptions(directory: URL(fileURLWithPath: "/tmp/cache")).ffiConfig.maxBytes)
   }
 
   func testDefaultQueryCacheDirectoryIsPerAppAndDeployment() throws {
@@ -155,52 +117,6 @@ final class ConvexMobileTests: XCTestCase {
 
     let values = try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
     XCTAssertEqual(values.isExcludedFromBackup, true)
-  }
-
-  func testInvalidSessionClearsQueryCache() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let fakeAuthProvider = FakeAuthProvider()
-    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: fakeAuthProvider)
-    _ = await client.login()
-
-    fakeAuthProvider.simulateTokenRefresh(newToken: nil)
-    // Auth changes are applied in call order, so the invalidation has been applied once this
-    // returns. Cached logins never clear the cache.
-    _ = await client.loginFromCache()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
-  }
-
-  func testLoginWhileSignedInClearsQueryCache() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
-    _ = await client.login()
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 0)
-
-    // A user switching accounts without logging out.
-    _ = await client.login()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
-  }
-
-  func testLoginFromCacheWhileSignedInKeepsQueryCache() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexClientWithAuth(ffiClient: fakeFfiClient, authProvider: FakeAuthProvider())
-    _ = await client.login()
-
-    _ = await client.loginFromCache()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 0)
-  }
-
-  func testLogoutClearsQueryCacheEvenIfLogoutFails() async throws {
-    let fakeFfiClient = FakeMobileConvexClient()
-    let client = ConvexClientWithAuth(
-      ffiClient: fakeFfiClient, authProvider: FailingLogoutAuthProvider())
-
-    await client.logout()
-
-    XCTAssertEqual(fakeFfiClient.clearQueryCacheCount, 1)
   }
 
   func testSubscribeCanTrimDupeVals() async throws {
@@ -991,20 +907,6 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     return "{\"_id\": \"the_id\", \"val\": \(receivedConvexInt), \"extra\": null}"
   }
 
-  private let clearQueryCacheLock = NSLock()
-  private var _clearQueryCacheCount = 0
-  var clearQueryCacheCount: Int { clearQueryCacheLock.withLock { _clearQueryCacheCount } }
-
-  func clearQueryCache() async throws {
-    clearQueryCacheLock.withLock { _clearQueryCacheCount += 1 }
-  }
-
-  var flushQueryCacheCount = 0
-
-  func flushQueryCache() async throws {
-    flushQueryCacheCount += 1
-  }
-
   let optimisticStore = FakeOptimisticLocalStore()
   var optimisticUpdateApplyCount = 0
 
@@ -1120,14 +1022,6 @@ class FakeAuthProvider: AuthProvider {
   /// Simulates a token refresh by invoking the stored callback with a new token.
   func simulateTokenRefresh(newToken: String?) {
     lock.withLock { storedOnIdToken }?(newToken)
-  }
-}
-
-class FailingLogoutAuthProvider: FakeAuthProvider {
-  struct LogoutFailed: Error {}
-
-  override func logout() async throws {
-    throw LogoutFailed()
   }
 }
 

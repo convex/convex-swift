@@ -69,17 +69,15 @@ your app's bundle identifier in Application Support. It's excluded from backups,
 watchOS and visionOS its files stay readable while the device is locked after its first unlock, so
 your app can refresh in the background.
 
-The cache is a SQLite database in that directory. For more settings, pass `QueryCacheOptions`:
+The cache is a SQLite database in that directory. It keeps the newest results that fit in 2 MB. To
+change the limit, pass `QueryCacheOptions`:
 
 ```swift
 let client = ConvexClient(
   deploymentUrl: deploymentUrl,
   queryCache: QueryCacheOptions(
     directory: try ConvexClient.defaultQueryCacheDirectory(for: deploymentUrl),
-    capacity: 500,  // query results to keep (default 1000), evicting the least recently sent
-    maxAge: 7 * 24 * 60 * 60,  // don't restore results older than a week (default: no limit)
-    sharedQueries: ["products:list"],  // the same for every user: kept across sign-outs
-    keepResultsOnError: false))  // an error from the server deletes the cached result (default)
+    maxBytes: 5 * 1024 * 1024))
 ```
 
 To show that a result may be out of date, use `subscribeWithCacheInfo`. Each `QueryUpdate` has the
@@ -95,17 +93,16 @@ client.subscribeWithCacheInfo(to: "messages:list", yielding: [Message].self)
   })
 ```
 
-Results are saved in the background at most every half second; call `flushQueryCache()` to wait for
-them to be written, for example before your app is suspended.
+Results are saved in the background at most every half second, so changes in the last half second
+before your app exits aren't saved.
 
 Keep in mind:
 
-- **Cached results belong to whoever was signed in.** They're saved with the user they were fetched
-  for (identified by the JWT's issuer and subject) and only shown to that user, and signing out
-  deletes them. Results for tokens without those claims aren't cached, except `sharedQueries`.
-  `ConvexClientWithAuth` also clears the cache when you call `logout()`, when your `AuthProvider`
-  passes `nil` to `onIdToken` because the session is no longer valid, and when `login()` succeeds
-  while a user is already signed in. Call `clearQueryCache()` yourself to delete everything.
+- **The cache holds one user's results.** At launch it shows the results of the user signed in last
+  (identified by the JWT's issuer and subject), even before they sign in again. Signing out, signing
+  in as someone else, or the server rejecting their token deletes them. With `ConvexClientWithAuth`,
+  that includes `logout()` and your `AuthProvider` passing `nil` to `onIdToken`. Results for tokens
+  without those claims aren't cached.
 - **Signing in offline must succeed.** If your app waits for `AuthState.authenticated` before
   subscribing, your `AuthProvider`'s `loginFromCache` has to return the stored credentials when it
   can't refresh them because the device is offline, even if their token has expired. If it throws,
